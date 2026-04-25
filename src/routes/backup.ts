@@ -5,6 +5,7 @@ import archiver from 'archiver';
 import { pool } from '../config/database';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 router.use(authenticate, requireAdmin);
@@ -55,17 +56,17 @@ async function createBackup(userId?: string): Promise<string> {
   return filename;
 }
 
-router.get('/', async (req: Request, res: Response) => {
-  const logs = await pool.query('SELECT * FROM backup_log ORDER BY created_at DESC LIMIT 30');
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
+  const logs = await pool.query('SELECT *, size_bytes::int AS size_bytes FROM backup_log ORDER BY created_at DESC LIMIT 30');
   const config = await pool.query("SELECT value FROM system_config WHERE key = 'backup_schedule_hour'");
   res.json({ success: true, data: { logs: logs.rows, schedule_hour: config.rows[0]?.value ?? '2' }, error: null });
-});
+}));
 
-router.post('/now', async (req: Request, res: Response) => {
+router.post('/now', asyncHandler(async (req: Request, res: Response) => {
   const filename = await createBackup(req.user!.id);
   await logActivity(req.user!.id, 'MANUAL_BACKUP', 'backup', undefined, { filename });
   res.json({ success: true, data: { filename }, error: null });
-});
+}));
 
 router.get('/download/:filename', (req: Request, res: Response) => {
   const filename = path.basename(req.params.filename);
@@ -74,7 +75,7 @@ router.get('/download/:filename', (req: Request, res: Response) => {
   res.download(filepath, filename);
 });
 
-router.post('/restore', async (req: Request, res: Response) => {
+router.post('/restore', asyncHandler(async (req: Request, res: Response) => {
   const { filename } = req.body as { filename: string };
   const filepath = path.join(BACKUP_DIR, path.basename(filename));
   if (!fs.existsSync(filepath)) { res.status(404).json({ success: false, data: null, error: 'File không tồn tại' }); return; }
@@ -83,7 +84,7 @@ router.post('/restore', async (req: Request, res: Response) => {
   await createBackup(req.user!.id);
   await logActivity(req.user!.id, 'RESTORE_BACKUP', 'backup', undefined, { filename });
   res.json({ success: true, data: { message: 'Khôi phục thành công' }, error: null });
-});
+}));
 
 export { createBackup };
 export default router;

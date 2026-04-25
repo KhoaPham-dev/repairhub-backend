@@ -5,6 +5,7 @@ import multer from 'multer';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 router.use(authenticate);
@@ -34,7 +35,7 @@ function generateOrderCode(): string {
   return `ORD-${date}-${seq}`;
 }
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const { status, branch_id, search, sort = 'desc', limit = '20', offset = '0' } = req.query;
   const params: unknown[] = [];
   let where = 'WHERE 1=1';
@@ -82,16 +83,16 @@ router.get('/', async (req: Request, res: Response) => {
   });
 
   res.json({ success: true, data: rows, error: null });
-});
+}));
 
-router.get('/status-counts', async (req: Request, res: Response) => {
+router.get('/status-counts', asyncHandler(async (req: Request, res: Response) => {
   const result = await pool.query('SELECT status, COUNT(*) AS count FROM orders GROUP BY status');
   const counts: Record<string, number> = {};
   for (const r of result.rows) counts[r.status] = Number(r.count);
   res.json({ success: true, data: counts, error: null });
-});
+}));
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const {
     customer_id, branch_id, product_type, device_name, serial_imei,
     accessories, fault_description, quotation,
@@ -123,9 +124,9 @@ router.post('/', async (req: Request, res: Response) => {
   );
   await logActivity(req.user!.id, 'CREATE_ORDER', 'order', result.rows[0].id);
   res.status(201).json({ success: true, data: result.rows[0], error: null });
-});
+}));
 
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT o.*, c.name AS customer_name, c.phone AS customer_phone, c.address AS customer_address,
             c.type AS customer_type, b.name AS branch_name, u.full_name AS created_by_name
@@ -149,9 +150,9 @@ router.get('/:id', async (req: Request, res: Response) => {
   ]);
 
   res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows }, error: null });
-});
+}));
 
-router.put('/:id/status', async (req: Request, res: Response) => {
+router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   const { status, notes } = req.body as { status: string; notes?: string };
   const order = await pool.query('SELECT status FROM orders WHERE id = $1', [req.params.id]);
   if (!order.rows[0]) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' }); return; }
@@ -185,7 +186,7 @@ router.put('/:id/status', async (req: Request, res: Response) => {
 
   const updated = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
   res.json({ success: true, data: updated.rows[0], error: null });
-});
+}));
 
 router.post('/:id/images', upload.array('images', 10), async (req: Request, res: Response) => {
   const files = req.files as Express.Multer.File[];

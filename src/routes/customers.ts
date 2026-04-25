@@ -2,11 +2,12 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 router.use(authenticate);
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const { search, type, limit = '50', offset = '0' } = req.query;
   let query = 'SELECT * FROM customers WHERE 1=1';
   const params: unknown[] = [];
@@ -25,9 +26,9 @@ router.get('/', async (req: Request, res: Response) => {
 
   const result = await pool.query(query, params);
   res.json({ success: true, data: result.rows, error: null });
-});
+}));
 
-router.get('/search', async (req: Request, res: Response) => {
+router.get('/search', asyncHandler(async (req: Request, res: Response) => {
   const { q } = req.query;
   if (!q) { res.json({ success: true, data: [], error: null }); return; }
 
@@ -36,9 +37,9 @@ router.get('/search', async (req: Request, res: Response) => {
     [`%${q}%`]
   );
   res.json({ success: true, data: result.rows, error: null });
-});
+}));
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const { phone, name, address, type, notes } = req.body as {
     phone: string; name: string; address?: string;
     type?: 'RETAIL' | 'PARTNER'; notes?: string;
@@ -56,9 +57,9 @@ router.post('/', async (req: Request, res: Response) => {
   );
   await logActivity(req.user!.id, 'CREATE_CUSTOMER', 'customer', result.rows[0].id);
   res.status(201).json({ success: true, data: result.rows[0], error: null });
-});
+}));
 
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   const customer = await pool.query('SELECT * FROM customers WHERE id = $1', [req.params.id]);
   if (!customer.rows[0]) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy khách hàng' }); return; }
 
@@ -67,9 +68,9 @@ router.get('/:id', async (req: Request, res: Response) => {
     [req.params.id]
   );
   res.json({ success: true, data: { ...customer.rows[0], orders: orders.rows }, error: null });
-});
+}));
 
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const { name, address, type, notes } = req.body as {
     name?: string; address?: string; type?: string; notes?: string;
   };
@@ -86,12 +87,12 @@ router.put('/:id', async (req: Request, res: Response) => {
   if (!result.rows[0]) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy khách hàng' }); return; }
   await logActivity(req.user!.id, 'UPDATE_CUSTOMER', 'customer', req.params.id);
   res.json({ success: true, data: result.rows[0], error: null });
-});
+}));
 
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
   await pool.query('DELETE FROM customers WHERE id = $1', [req.params.id]);
   await logActivity(req.user!.id, 'DELETE_CUSTOMER', 'customer', req.params.id);
   res.json({ success: true, data: null, error: null });
-});
+}));
 
 export default router;

@@ -4,10 +4,11 @@ import jwt from 'jsonwebtoken';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', asyncHandler(async (req: Request, res: Response) => {
   const { username, password } = req.body as { username?: string; password?: string };
 
   if (!username || !password) {
@@ -52,19 +53,19 @@ router.post('/login', async (req: Request, res: Response) => {
     },
     error: null,
   });
-});
+}));
 
-router.post('/logout', authenticate, async (req: Request, res: Response) => {
+router.post('/logout', authenticate, asyncHandler(async (req: Request, res: Response) => {
   if (req.user) await logActivity(req.user.id, 'LOGOUT', 'user', req.user.id);
   res.json({ success: true, data: null, error: null });
-});
+}));
 
-router.get('/me', authenticate, async (req: Request, res: Response) => {
+router.get('/me', authenticate, asyncHandler(async (req: Request, res: Response) => {
   const result = await pool.query(
     'SELECT id, username, full_name, role, branch_id FROM users WHERE id = $1',
     [req.user!.id]
   );
   res.json({ success: true, data: result.rows[0] || null, error: null });
-});
+}));
 
 export default router;

@@ -1,11 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 router.use(authenticate);
 
-router.get('/search', async (req: Request, res: Response) => {
+router.get('/search', asyncHandler(async (req: Request, res: Response) => {
   const { q } = req.query;
   if (!q) { res.json({ success: true, data: [], error: null }); return; }
 
@@ -36,6 +37,6 @@ router.get('/search', async (req: Request, res: Response) => {
   );
 
   res.json({ success: true, data: result.rows, error: null });
-});
+}));
 
 export default router;
