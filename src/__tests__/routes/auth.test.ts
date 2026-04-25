@@ -86,7 +86,7 @@ describe('GET /api/auth/me', () => {
 
   it('returns user data with valid token', async () => {
     const jwt = require('jsonwebtoken');
-    const token = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, 'change-me', { expiresIn: '1h' });
+    const token = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, process.env.JWT_SECRET!, { expiresIn: '1h' });
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'u1', username: 'admin', full_name: 'Admin', role: 'ADMIN', branch_id: null }] });
     const app = buildApp();
     const res = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
@@ -104,7 +104,7 @@ describe('POST /api/auth/logout', () => {
 
   it('returns 200 with valid token', async () => {
     const jwt = require('jsonwebtoken');
-    const token = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, 'change-me', { expiresIn: '1h' });
+    const token = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, process.env.JWT_SECRET!, { expiresIn: '1h' });
     const app = buildApp();
     const res = await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);

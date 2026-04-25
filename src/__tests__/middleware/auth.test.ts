@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { authenticate, requireAdmin, AuthUser } from '../../middleware/auth';
 
-const SECRET = 'change-me';
+const SECRET = process.env.JWT_SECRET!;
 
 function makeReqResNext(overrides: Partial<Request> = {}): {
   req: Partial<Request>;

@@ -10,7 +10,7 @@ import warrantyRouter from '../../routes/warranty';
 import { errorHandler } from '../../middleware/errorHandler';
 
 const mockQuery = pool.query as jest.Mock;
-const SECRET = 'change-me';
+const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
 
 function buildApp() {

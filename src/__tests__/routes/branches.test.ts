@@ -15,7 +15,7 @@ import { logActivity } from '../../utils/activityLog';
 
 const mockQuery = pool.query as jest.Mock;
 const mockLogActivity = logActivity as jest.Mock;
-const SECRET = 'change-me';
+const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
 const techToken = jwt.sign({ id: 'u2', username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
 

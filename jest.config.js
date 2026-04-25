@@ -4,4 +4,5 @@ module.exports = {
   testMatch: ['**/__tests__/**/*.test.ts'],
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts'],
   coverageThreshold: { global: { lines: 80 } },
+  setupFiles: ['<rootDir>/jest.setup.ts'],
 };
