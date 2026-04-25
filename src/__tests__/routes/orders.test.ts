@@ -12,6 +12,14 @@ jest.mock('multer', () => {
   multer.diskStorage = () => ({});
   return multer;
 });
+jest.mock('sharp', () => {
+  const sharpMock = jest.fn(() => ({
+    resize: jest.fn().mockReturnThis(),
+    jpeg: jest.fn().mockReturnThis(),
+    toFile: jest.fn().mockResolvedValue(undefined),
+  }));
+  return sharpMock;
+});
 
 import request from 'supertest';
 import express from 'express';
@@ -87,13 +95,176 @@ describe('POST /api/orders', () => {
       .send({
         customer_id: 'c1',
         branch_id: 'b1',
-        product_type: 'phone',
-        device_name: 'iPhone 14',
-        fault_description: 'broken screen',
-        quotation: 1000000,
+        product_type: 'SPEAKER',
+        device_name: 'JBL Flip 6',
+        fault_description: 'no sound',
+        quotation: 500000,
+        warranty_period_months: 6,
       });
     expect(res.status).toBe(201);
     expect(res.body.data.order_code).toMatch(/ORD-/);
+  });
+
+  it('creates order with default warranty_period_months when not provided', async () => {
+    const created = { id: 'o2', order_code: 'ORD-20260425-00002', status: 'TIEP_NHAN' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [created] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        customer_id: 'c1',
+        branch_id: 'b1',
+        product_type: 'HEADPHONE',
+        device_name: 'Sony WH-1000XM5',
+        fault_description: 'battery issue',
+      });
+    expect(res.status).toBe(201);
+    // verify warranty_period_months defaulted to 3 by checking the INSERT was called
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO orders'),
+      expect.arrayContaining([3])
+    );
+  });
+});
+
+describe('POST /api/orders/warranty-claim', () => {
+  it('returns 400 when required fields are missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1' }); // missing branch_id
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Thiếu thông tin/);
+  });
+
+  it('returns 404 when source order not found', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // source order not found
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o-nonexistent', branch_id: 'b1' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/đơn gốc/);
+  });
+
+  it('returns 409 when warranty order already exists', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'ORD-20260425-00001',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order found
+      .mockResolvedValueOnce({ rows: [{ id: 'bh1' }] }); // duplicate BH order exists
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/Bảo Hành/);
+  });
+
+  it('creates warranty claim order successfully', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'ORD-20260425-00001',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = {
+      id: 'bh1', order_code: 'ORD-20260425-00001-BH',
+      status: 'DANG_BAO_HANH', product_type: 'BAO_HANH',
+    };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order
+      .mockResolvedValueOnce({ rows: [] })            // duplicate check — none
+      .mockResolvedValueOnce({ rows: [newBhOrder] })  // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] });            // INSERT status history
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1', notes: 'Loa bị hư' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order_code).toBe('ORD-20260425-00001-BH');
+    expect(res.body.data.status).toBe('DANG_BAO_HANH');
+    expect(mockLogActivity).toHaveBeenCalledWith('u1', 'CREATE_WARRANTY_ORDER', 'order', 'bh1', { source: 'o1' });
+  });
+});
+
+describe('POST /api/orders/bulk', () => {
+  it('returns 400 when required fields are missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/orders/bulk')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ customer_id: 'c1', branch_id: 'b1' }); // missing products
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when products array is empty', async () => {
+    const res = await request(buildApp())
+      .post('/api/orders/bulk')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ customer_id: 'c1', branch_id: 'b1', products: [] });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when a product is missing required fields', async () => {
+    const res = await request(buildApp())
+      .post('/api/orders/bulk')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        customer_id: 'c1',
+        branch_id: 'b1',
+        products: [{ product_type: 'SPEAKER' }], // missing device_name, fault_description
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sản phẩm/);
+  });
+
+  it('creates multiple orders and returns 201 with all created', async () => {
+    const order1 = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
+    const order2 = { id: 'o2', order_code: 'ORD-20260425-00002', status: 'TIEP_NHAN' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order1] }) // INSERT order 1
+      .mockResolvedValueOnce({ rows: [] })        // INSERT history 1
+      .mockResolvedValueOnce({ rows: [order2] }) // INSERT order 2
+      .mockResolvedValueOnce({ rows: [] });       // INSERT history 2
+    const res = await request(buildApp())
+      .post('/api/orders/bulk')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        customer_id: 'c1',
+        branch_id: 'b1',
+        products: [
+          { product_type: 'SPEAKER', device_name: 'JBL Flip 6', fault_description: 'no sound', quotation: 500000 },
+          { product_type: 'HEADPHONE', device_name: 'Sony WH-1000XM5', fault_description: 'battery issue', quotation: 300000 },
+        ],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0].order_code).toBe('ORD-20260425-00001');
+    expect(res.body.data[1].order_code).toBe('ORD-20260425-00002');
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+  });
+
+  it('creates single order in bulk and returns 201', async () => {
+    const order = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders/bulk')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        customer_id: 'c1',
+        branch_id: 'b1',
+        products: [
+          { product_type: 'OTHER', device_name: 'Generic Device', fault_description: 'overheating', quotation: 200000, warranty_period_months: 6 },
+        ],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data).toHaveLength(1);
   });
 });
 
@@ -159,5 +330,40 @@ describe('PUT /api/orders/:id/status', () => {
       .send({ status: 'DANG_SUA_CHUA' });
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('DANG_SUA_CHUA');
+  });
+
+  it('accepts DANG_BAO_HANH as valid status', async () => {
+    const updated = { id: 'o1', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'TIEP_NHAN' }] }) // current order
+      .mockResolvedValueOnce({ rows: [] }) // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] }) // INSERT history
+      .mockResolvedValueOnce({ rows: [updated] }); // SELECT updated
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'DANG_BAO_HANH' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('DANG_BAO_HANH');
+  });
+
+  it('uses warranty_period_months from DB when transitioning to DA_GIAO', async () => {
+    const updated = { id: 'o1', status: 'DA_GIAO' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })              // current order status
+      .mockResolvedValueOnce({ rows: [{ warranty_period_months: 6 }] })        // fetch warranty months
+      .mockResolvedValueOnce({ rows: [] })                                     // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] })                                     // INSERT history
+      .mockResolvedValueOnce({ rows: [updated] });                             // SELECT updated
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'DA_GIAO' });
+    expect(res.status).toBe(200);
+    // Check that the UPDATE query included '6 months'
+    const updateCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
+    );
+    expect(updateCall![0]).toContain('6 months');
   });
 });

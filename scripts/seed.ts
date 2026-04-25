@@ -14,6 +14,10 @@ async function seed() {
   await pool.query(sql);
   console.log('✓ Schema ready');
 
+  const sql2 = fs.readFileSync(path.join(__dirname, '../migrations/002_feedback_round_1.sql'), 'utf8');
+  await pool.query(sql2);
+  console.log('✓ Migration 002 applied');
+
   // Default branch
   const branch = await pool.query(`
     INSERT INTO branches (name, address, phone, manager_name)

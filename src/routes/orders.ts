@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
+import sharp from 'sharp';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
@@ -23,7 +24,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 const STATUS_FLOW = [
-  'TIEP_NHAN', 'DANG_KIEM_TRA', 'BAO_GIA', 'CHO_LINH_KIEN',
+  'TIEP_NHAN', 'DANG_BAO_HANH', 'DANG_KIEM_TRA', 'BAO_GIA', 'CHO_LINH_KIEN',
   'DANG_SUA_CHUA', 'KIEM_TRA_LAI', 'SUA_XONG', 'DA_GIAO', 'HUY_TRA_MAY',
 ];
 const TERMINAL_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
@@ -95,11 +96,11 @@ router.get('/status-counts', asyncHandler(async (req: Request, res: Response) =>
 router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const {
     customer_id, branch_id, product_type, device_name, serial_imei,
-    accessories, fault_description, quotation,
+    accessories, fault_description, quotation, warranty_period_months,
   } = req.body as {
     customer_id: string; branch_id: string; product_type: string;
     device_name: string; serial_imei?: string; accessories?: string;
-    fault_description: string; quotation: number;
+    fault_description: string; quotation: number; warranty_period_months?: number;
   };
 
   if (!customer_id || !branch_id || !product_type || !device_name || !fault_description) {
@@ -111,11 +112,12 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const result = await pool.query(
     `INSERT INTO orders
        (order_code, customer_id, branch_id, created_by, product_type, device_name,
-        serial_imei, accessories, fault_description, quotation)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        serial_imei, accessories, fault_description, quotation, warranty_period_months)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
     [orderCode, customer_id, branch_id, req.user!.id, product_type,
-     device_name, serial_imei || null, accessories || null, fault_description, quotation || 0]
+     device_name, serial_imei || null, accessories || null, fault_description, quotation || 0,
+     warranty_period_months || 3]
   );
 
   await pool.query(
@@ -124,6 +126,98 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   );
   await logActivity(req.user!.id, 'CREATE_ORDER', 'order', result.rows[0].id);
   res.status(201).json({ success: true, data: result.rows[0], error: null });
+}));
+
+router.post('/warranty-claim', asyncHandler(async (req: Request, res: Response) => {
+  const { source_order_id, branch_id, notes } = req.body as {
+    source_order_id: string; branch_id: string; notes?: string;
+  };
+
+  if (!source_order_id || !branch_id) {
+    res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin bắt buộc' });
+    return;
+  }
+
+  // Load source order
+  const src = await pool.query('SELECT * FROM orders WHERE id = $1', [source_order_id]);
+  if (!src.rows[0]) {
+    res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn gốc' });
+    return;
+  }
+
+  const sourceOrder = src.rows[0];
+  const bhCode = `${sourceOrder.order_code}-BH`;
+
+  // Check duplicate
+  const dup = await pool.query('SELECT id FROM orders WHERE order_code = $1', [bhCode]);
+  if (dup.rows.length > 0) {
+    res.status(409).json({ success: false, data: null, error: 'Đơn này đã trong Bảo Hành' });
+    return;
+  }
+
+  // Create BH order
+  const result = await pool.query(
+    `INSERT INTO orders
+       (order_code, customer_id, branch_id, created_by, product_type, device_name,
+        serial_imei, fault_description, quotation, warranty_period_months, status)
+     VALUES ($1,$2,$3,$4,'BAO_HANH',$5,$6,$7,0,$8,'DANG_BAO_HANH')
+     RETURNING *`,
+    [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
+     sourceOrder.device_name, sourceOrder.serial_imei,
+     notes || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
+  );
+
+  await pool.query(
+    `INSERT INTO order_status_history (order_id, changed_by, new_status, notes)
+     VALUES ($1,$2,'DANG_BAO_HANH',$3)`,
+    [result.rows[0].id, req.user!.id, notes || null]
+  );
+  await logActivity(req.user!.id, 'CREATE_WARRANTY_ORDER', 'order', result.rows[0].id, { source: source_order_id });
+  res.status(201).json({ success: true, data: result.rows[0], error: null });
+}));
+
+router.post('/bulk', asyncHandler(async (req: Request, res: Response) => {
+  const { customer_id, branch_id, products } = req.body as {
+    customer_id: string;
+    branch_id: string;
+    products: Array<{
+      product_type: string; device_name: string; serial_imei?: string;
+      accessories?: string; fault_description: string; quotation: number;
+      warranty_period_months?: number;
+    }>;
+  };
+
+  if (!customer_id || !branch_id || !Array.isArray(products) || products.length === 0) {
+    res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin bắt buộc' });
+    return;
+  }
+
+  const created = [];
+  for (const p of products) {
+    if (!p.product_type || !p.device_name || !p.fault_description) {
+      res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin sản phẩm' });
+      return;
+    }
+    const orderCode = generateOrderCode();
+    const result = await pool.query(
+      `INSERT INTO orders
+         (order_code, customer_id, branch_id, created_by, product_type, device_name,
+          serial_imei, accessories, fault_description, quotation, warranty_period_months)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING *`,
+      [orderCode, customer_id, branch_id, req.user!.id, p.product_type,
+       p.device_name, p.serial_imei || null, p.accessories || null,
+       p.fault_description, p.quotation || 0, p.warranty_period_months || 3]
+    );
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, changed_by, new_status) VALUES ($1,$2,'TIEP_NHAN')`,
+      [result.rows[0].id, req.user!.id]
+    );
+    await logActivity(req.user!.id, 'CREATE_ORDER', 'order', result.rows[0].id);
+    created.push(result.rows[0]);
+  }
+
+  res.status(201).json({ success: true, data: created, error: null });
 }));
 
 router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
@@ -170,7 +264,10 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   let warrantyUpdate = '';
   const updateParams: unknown[] = [status, req.params.id];
   if (status === 'DA_GIAO') {
-    warrantyUpdate = ', warranty_end_date = CURRENT_DATE + INTERVAL \'12 months\'';
+    const orderRow = await pool.query('SELECT warranty_period_months FROM orders WHERE id = $1', [req.params.id]);
+    const months = orderRow.rows[0]?.warranty_period_months || 12;
+    warrantyUpdate = `, warranty_end_date = CURRENT_DATE + INTERVAL '${months} months'`;
+    // Note: months is an integer from DB, not user input, so interpolation is safe
   }
 
   await pool.query(
@@ -197,11 +294,26 @@ router.post('/:id/images', upload.array('images', 10), async (req: Request, res:
 
   const imageType = (req.body.image_type as string) || 'INTAKE';
   const inserted = [];
+  const TWO_MB = 2 * 1024 * 1024;
+
   for (const file of files) {
+    let finalFilename = file.filename;
+
+    if (file.size > TWO_MB) {
+      const compressedName = `c-${file.filename}`;
+      const compressedPath = path.join(uploadDir, compressedName);
+      await sharp(path.join(uploadDir, file.filename))
+        .resize({ width: 1920, withoutEnlargement: true })
+        .jpeg({ quality: 75 })
+        .toFile(compressedPath);
+      fs.unlinkSync(path.join(uploadDir, file.filename)); // remove original
+      finalFilename = compressedName;
+    }
+
     const r = await pool.query(
       `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
        VALUES ($1,$2,$3,$4) RETURNING *`,
-      [req.params.id, file.filename, imageType, req.user!.id]
+      [req.params.id, finalFilename, imageType, req.user!.id]
     );
     inserted.push(r.rows[0]);
   }
