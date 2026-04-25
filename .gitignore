@@ -3,3 +3,6 @@ dist/
 .env
 uploads/
 *.js.map
+backups/
+.env
+uploads/
