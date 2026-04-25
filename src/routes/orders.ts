@@ -21,7 +21,14 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    cb(null, ALLOWED_MIME_TYPES.has(file.mimetype));
+  },
+});
 
 const STATUS_FLOW = [
   'TIEP_NHAN', 'DANG_BAO_HANH', 'DANG_KIEM_TRA', 'BAO_GIA', 'CHO_LINH_KIEN',
@@ -191,15 +198,24 @@ router.post('/bulk', asyncHandler(async (req: Request, res: Response) => {
     res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin bắt buộc' });
     return;
   }
+  if (products.length > 20) {
+    res.status(400).json({ success: false, data: null, error: 'Tối đa 20 sản phẩm mỗi lần tạo' });
+    return;
+  }
 
+  const client = await pool.connect();
   const created = [];
+  try {
+    await client.query('BEGIN');
   for (const p of products) {
     if (!p.product_type || !p.device_name || !p.fault_description) {
+      await client.query('ROLLBACK');
+      client.release();
       res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin sản phẩm' });
       return;
     }
     const orderCode = generateOrderCode();
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO orders
          (order_code, customer_id, branch_id, created_by, product_type, device_name,
           serial_imei, accessories, fault_description, quotation, warranty_period_months)
@@ -209,12 +225,16 @@ router.post('/bulk', asyncHandler(async (req: Request, res: Response) => {
        p.device_name, p.serial_imei || null, p.accessories || null,
        p.fault_description, p.quotation || 0, p.warranty_period_months || 3]
     );
-    await pool.query(
+    await client.query(
       `INSERT INTO order_status_history (order_id, changed_by, new_status) VALUES ($1,$2,'TIEP_NHAN')`,
       [result.rows[0].id, req.user!.id]
     );
     await logActivity(req.user!.id, 'CREATE_ORDER', 'order', result.rows[0].id);
     created.push(result.rows[0]);
+  }
+    await client.query('COMMIT');
+  } finally {
+    client.release();
   }
 
   res.status(201).json({ success: true, data: created, error: null });
@@ -265,9 +285,9 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   const updateParams: unknown[] = [status, req.params.id];
   if (status === 'DA_GIAO') {
     const orderRow = await pool.query('SELECT warranty_period_months FROM orders WHERE id = $1', [req.params.id]);
-    const months = orderRow.rows[0]?.warranty_period_months || 12;
-    warrantyUpdate = `, warranty_end_date = CURRENT_DATE + INTERVAL '${months} months'`;
-    // Note: months is an integer from DB, not user input, so interpolation is safe
+    const months = Number(orderRow.rows[0]?.warranty_period_months) || 12;
+    updateParams.push(months);
+    warrantyUpdate = `, warranty_end_date = CURRENT_DATE + ($${updateParams.length} * INTERVAL '1 month')`;
   }
 
   await pool.query(
@@ -285,7 +305,19 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: updated.rows[0], error: null });
 }));
 
-router.post('/:id/images', upload.array('images', 10), async (req: Request, res: Response) => {
+router.post('/:id/images', upload.array('images', 10), asyncHandler(async (req: Request, res: Response) => {
+  const orderCheck = await pool.query('SELECT created_by FROM orders WHERE id = $1', [req.params.id]);
+  if (!orderCheck.rows[0]) {
+    res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' });
+    return;
+  }
+  const isAdmin = req.user!.role === 'ADMIN';
+  const isCreator = orderCheck.rows[0].created_by === req.user!.id;
+  if (!isAdmin && !isCreator) {
+    res.status(403).json({ success: false, data: null, error: 'Không có quyền tải ảnh cho đơn này' });
+    return;
+  }
+
   const files = req.files as Express.Multer.File[];
   if (!files || files.length === 0) {
     res.status(400).json({ success: false, data: null, error: 'Không có ảnh nào được tải lên' });
@@ -320,6 +352,6 @@ router.post('/:id/images', upload.array('images', 10), async (req: Request, res:
 
   await logActivity(req.user!.id, 'UPLOAD_IMAGES', 'order', req.params.id, { count: files.length });
   res.status(201).json({ success: true, data: inserted, error: null });
-});
+}));
 
 export default router;

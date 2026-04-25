@@ -1,5 +1,10 @@
+const mockClientQuery = jest.fn();
+const mockClientRelease = jest.fn();
 jest.mock('../../config/database', () => ({
-  pool: { query: jest.fn() },
+  pool: {
+    query: jest.fn(),
+    connect: jest.fn(),
+  },
 }));
 jest.mock('../../utils/activityLog', () => ({
   logActivity: jest.fn().mockResolvedValue(undefined),
@@ -30,6 +35,7 @@ import { errorHandler } from '../../middleware/errorHandler';
 import { logActivity } from '../../utils/activityLog';
 
 const mockQuery = pool.query as jest.Mock;
+const mockConnect = pool.connect as jest.Mock;
 const mockLogActivity = logActivity as jest.Mock;
 const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
@@ -44,6 +50,12 @@ function buildApp() {
 
 beforeEach(() => {
   mockLogActivity.mockResolvedValue(undefined);
+  // Provide a transactional client mock for bulk endpoint
+  mockClientQuery.mockResolvedValue({ rows: [] });
+  mockConnect.mockResolvedValue({
+    query: mockClientQuery,
+    release: mockClientRelease,
+  });
 });
 
 afterEach(() => jest.resetAllMocks());
@@ -210,6 +222,10 @@ describe('POST /api/orders/bulk', () => {
   });
 
   it('returns 400 when a product is missing required fields', async () => {
+    // client.query for BEGIN succeeds; product validation fails before any INSERT
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
     const res = await request(buildApp())
       .post('/api/orders/bulk')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -225,11 +241,13 @@ describe('POST /api/orders/bulk', () => {
   it('creates multiple orders and returns 201 with all created', async () => {
     const order1 = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
     const order2 = { id: 'o2', order_code: 'ORD-20260425-00002', status: 'TIEP_NHAN' };
-    mockQuery
-      .mockResolvedValueOnce({ rows: [order1] }) // INSERT order 1
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })        // BEGIN
+      .mockResolvedValueOnce({ rows: [order1] })  // INSERT order 1
       .mockResolvedValueOnce({ rows: [] })        // INSERT history 1
-      .mockResolvedValueOnce({ rows: [order2] }) // INSERT order 2
-      .mockResolvedValueOnce({ rows: [] });       // INSERT history 2
+      .mockResolvedValueOnce({ rows: [order2] })  // INSERT order 2
+      .mockResolvedValueOnce({ rows: [] })        // INSERT history 2
+      .mockResolvedValueOnce({ rows: [] });       // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/bulk')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -250,9 +268,11 @@ describe('POST /api/orders/bulk', () => {
 
   it('creates single order in bulk and returns 201', async () => {
     const order = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
-    mockQuery
-      .mockResolvedValueOnce({ rows: [order] })
-      .mockResolvedValueOnce({ rows: [] });
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })       // BEGIN
+      .mockResolvedValueOnce({ rows: [order] })  // INSERT order
+      .mockResolvedValueOnce({ rows: [] })       // INSERT history
+      .mockResolvedValueOnce({ rows: [] });      // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/bulk')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -360,10 +380,39 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'DA_GIAO' });
     expect(res.status).toBe(200);
-    // Check that the UPDATE query included '6 months'
+    // New parameterized form: SQL uses INTERVAL '1 month' * $N, params include 6
     const updateCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
     );
-    expect(updateCall![0]).toContain('6 months');
+    expect(updateCall![0]).toContain("INTERVAL '1 month'");
+    expect(updateCall![1]).toContain(6);
+  });
+});
+
+describe('POST /api/orders/:id/images', () => {
+  it('returns 404 when order not found', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // order not found
+    const res = await request(buildApp())
+      .post('/api/orders/o99/images')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 403 when technician does not own the order', async () => {
+    const techToken = jwt.sign({ id: 'u-tech', username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
+    mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u-other' }] }); // order owned by someone else
+    const res = await request(buildApp())
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${techToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 400 when no files uploaded (admin can upload to any order)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u-other' }] }); // admin bypasses ownership
+    const res = await request(buildApp())
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/ảnh/);
   });
 });
