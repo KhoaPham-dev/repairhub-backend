@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS orders (
   branch_id UUID NOT NULL REFERENCES branches(id),
   created_by UUID NOT NULL REFERENCES users(id),
   status VARCHAR(30) NOT NULL DEFAULT 'TIEP_NHAN',
-  product_type VARCHAR(20) NOT NULL CHECK (product_type IN ('SPEAKER', 'HEADPHONE', 'OTHER')),
+  product_type VARCHAR(20) NOT NULL CHECK (product_type IN ('SPEAKER', 'HEADPHONE', 'OTHER', 'BAO_HANH')),
   device_name VARCHAR(100) NOT NULL,
   serial_imei VARCHAR(100),
   accessories TEXT,
