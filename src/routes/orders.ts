@@ -266,6 +266,44 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows }, error: null });
 }));
 
+router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
+  const { quotation, warranty_period_months, notes } = req.body as {
+    quotation?: number; warranty_period_months?: number; notes?: string;
+  };
+  const order = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
+  if (!order.rows[0]) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' }); return; }
+
+  const sets: string[] = ['updated_at = NOW()'];
+  const params: unknown[] = [];
+  let idx = 1;
+
+  if (quotation !== undefined && quotation !== null) {
+    sets.push(`quotation = $${idx}`); params.push(quotation); idx++;
+  }
+  if (warranty_period_months !== undefined && warranty_period_months !== null) {
+    sets.push(`warranty_period_months = $${idx}`); params.push(warranty_period_months); idx++;
+  }
+
+  if (params.length === 0) {
+    res.status(400).json({ success: false, data: null, error: 'Không có dữ liệu cập nhật' }); return;
+  }
+
+  params.push(req.params.id);
+  await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idx}`, params);
+
+  if (notes) {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, changed_by, old_status, new_status, notes)
+       VALUES ($1,$2,$3,$3,$4)`,
+      [req.params.id, req.user!.id, order.rows[0].status, notes]
+    );
+  }
+
+  await logActivity(req.user!.id, 'UPDATE_ORDER', 'order', req.params.id, { quotation, warranty_period_months });
+  const updated = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
+  res.json({ success: true, data: updated.rows[0], error: null });
+}));
+
 router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   const { status, notes } = req.body as { status: string; notes?: string };
   const order = await pool.query('SELECT status FROM orders WHERE id = $1', [req.params.id]);
