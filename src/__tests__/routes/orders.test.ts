@@ -388,19 +388,13 @@ describe('PUT /api/orders/:id/status', () => {
     expect(res.body.data.status).toBe('DANG_SUA_CHUA');
   });
 
-  it('accepts DANG_BAO_HANH as valid status', async () => {
-    const updated = { id: 'o1', status: 'DANG_BAO_HANH' };
-    mockQuery
-      .mockResolvedValueOnce({ rows: [{ status: 'TIEP_NHAN' }] }) // current order
-      .mockResolvedValueOnce({ rows: [] }) // UPDATE orders
-      .mockResolvedValueOnce({ rows: [] }) // INSERT history
-      .mockResolvedValueOnce({ rows: [updated] }); // SELECT updated
+  it('rejects DANG_BAO_HANH via status update route (set only by warranty-claim)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'TIEP_NHAN' }] }); // current order
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'DANG_BAO_HANH' });
-    expect(res.status).toBe(200);
-    expect(res.body.data.status).toBe('DANG_BAO_HANH');
+    expect(res.status).toBe(400);
   });
 
   it('uses warranty_period_months from DB when transitioning to DA_GIAO', async () => {
