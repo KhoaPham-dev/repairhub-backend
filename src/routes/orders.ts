@@ -94,7 +94,20 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 router.get('/status-counts', asyncHandler(async (req: Request, res: Response) => {
-  const result = await pool.query('SELECT status, COUNT(*) AS count FROM orders GROUP BY status');
+  const { period } = req.query as { period?: string };
+
+  let whereClause = '';
+  if (period === 'today') {
+    whereClause = `WHERE created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + INTERVAL '1 day'`;
+  } else if (period === 'week') {
+    whereClause = `WHERE created_at >= date_trunc('week', CURRENT_DATE) AND created_at < date_trunc('week', CURRENT_DATE) + INTERVAL '7 days'`;
+  } else if (period === 'month') {
+    whereClause = `WHERE created_at >= date_trunc('month', CURRENT_DATE) AND created_at < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`;
+  }
+
+  const result = await pool.query(
+    `SELECT status, COUNT(*) AS count FROM orders ${whereClause} GROUP BY status`
+  );
   const counts: Record<string, number> = {};
   for (const r of result.rows) counts[r.status] = Number(r.count);
   res.json({ success: true, data: counts, error: null });
