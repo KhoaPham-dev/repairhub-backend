@@ -79,11 +79,47 @@ describe('GET /api/orders', () => {
 });
 
 describe('GET /api/orders/status-counts', () => {
-  it('returns status counts', async () => {
+  it('returns status counts (all-time, no period)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ status: 'TIEP_NHAN', count: '5' }] });
     const res = await request(buildApp()).get('/api/orders/status-counts').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.data.TIEP_NHAN).toBe(5);
+  });
+
+  it('returns status counts filtered by period=today', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DA_GIAO', count: '2' }] });
+    const res = await request(buildApp())
+      .get('/api/orders/status-counts?period=today')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.DA_GIAO).toBe(2);
+  });
+
+  it('returns status counts filtered by period=week', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA', count: '3' }] });
+    const res = await request(buildApp())
+      .get('/api/orders/status-counts?period=week')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.DANG_SUA_CHUA).toBe(3);
+  });
+
+  it('returns status counts filtered by period=month', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG', count: '7' }] });
+    const res = await request(buildApp())
+      .get('/api/orders/status-counts?period=month')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.SUA_XONG).toBe(7);
+  });
+
+  it('returns all-time counts for unknown period value', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'TIEP_NHAN', count: '10' }] });
+    const res = await request(buildApp())
+      .get('/api/orders/status-counts?period=yearly')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.TIEP_NHAN).toBe(10);
   });
 });
 
