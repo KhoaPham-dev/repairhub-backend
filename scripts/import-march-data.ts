@@ -1,10 +1,17 @@
 import * as XLSX from 'xlsx';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
+import * as path from 'path';
 
 dotenv.config();
 
-const EXCEL_PATH = '/Users/agile/Downloads/RepairData_Thang3.xlsx';
+// Accept Excel path as CLI arg or fall back to env var
+const EXCEL_PATH = process.argv[2] || process.env.IMPORT_FILE || '';
+
+const KNOWN_STATUSES = new Set([
+  'TIEP_NHAN','DANG_KIEM_TRA','BAO_GIA','DANG_SUA_CHUA',
+  'SUA_XONG','DA_GIAO','TRA_HANG','HUY_TRA_MAY','DANG_BAO_HANH',
+]);
 
 const STATUS_MAP: Record<string, string> = {
   DA_NHAN:    'TIEP_NHAN',
@@ -20,9 +27,26 @@ const TYPE_MAP: Record<string, string> = {
   DOI_TAC:  'PARTNER',
 };
 
-function parseDate(s: string): Date {
-  const [d, m, y] = s.split('/').map(Number);
-  return new Date(y, m - 1, d);
+// Strip non-printable characters and truncate to maxLen
+function sanitize(val: unknown, maxLen: number): string {
+  return String(val ?? '')
+    .replace(/[^\x20-\x7EÀ-ɏḀ-ỿ]/g, '')
+    .trim()
+    .slice(0, maxLen);
+}
+
+// Sanitize phone: keep digits, +, spaces, dashes only
+function sanitizePhone(val: unknown): string {
+  return String(val ?? '').replace(/[^0-9+() \-]/g, '').trim().slice(0, 20);
+}
+
+function parseDate(s: string): Date | null {
+  const parts = s.split('/').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return null;
+  const [d, m, y] = parts;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return null;
+  return date;
 }
 
 function formatDateCode(date: Date): string {
@@ -33,12 +57,31 @@ function formatDateCode(date: Date): string {
 }
 
 async function main() {
+  // Guard: required env vars
+  const missing = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD'].filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required env vars: ${missing.join(', ')}. Check your .env file.`);
+  }
+
+  // Guard: Excel file path must be provided
+  if (!EXCEL_PATH) {
+    throw new Error('Usage: npm run import:march <path-to-excel-file>');
+  }
+
+  // Guard: --force flag required to prevent accidental data wipe
+  if (!process.argv.includes('--force')) {
+    throw new Error(
+      'This script deletes ALL orders and customers. Re-run with --force to confirm:\n' +
+      '  npm run import:march <file> -- --force'
+    );
+  }
+
   const pool = new Pool({
-    host:     process.env.DB_HOST     || 'localhost',
+    host:     process.env.DB_HOST,
     port:     Number(process.env.DB_PORT) || 5432,
-    database: process.env.DB_NAME     || 'repairhub',
-    user:     process.env.DB_USER     || 'postgres',
-    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME,
+    user:     process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
   });
 
   try {
@@ -59,15 +102,12 @@ async function main() {
     const adminId: string = userRes.rows[0].id;
 
     // Step 3: read Excel
-    const workbook = XLSX.readFile(EXCEL_PATH);
+    const workbook = XLSX.readFile(path.resolve(EXCEL_PATH));
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
 
-    // rows[0] is header; data starts at rows[1]
     const dataRows = rows.slice(1) as Array<Array<string | number | null>>;
-
-    // Build per-date sequence counters
     const dateSeq: Record<string, number> = {};
 
     let imported = 0;
@@ -77,38 +117,48 @@ async function main() {
 
     for (const row of dataRows) {
       try {
-        // Col 2: status
-        const rawStatus = String(row[2] ?? '').trim();
-        const status = STATUS_MAP[rawStatus] ?? rawStatus;
+        // Col 2: status — skip rows with unrecognized status after mapping
+        const rawStatus = sanitize(row[2], 30);
+        const status = STATUS_MAP[rawStatus] ?? (KNOWN_STATUSES.has(rawStatus) ? rawStatus : null);
+        if (!status) {
+          console.warn(`Skipping row: unrecognized status "${rawStatus}"`);
+          skipped++;
+          continue;
+        }
 
-        // Col 3: fault_description (Ghi Chú)
-        const faultDescription = String(row[3] ?? '').trim();
+        // Col 3: fault_description
+        const faultDescription = sanitize(row[3], 500) || 'Nhập từ dữ liệu cũ';
 
         // Col 4: date
-        const rawDate = String(row[4] ?? '').trim();
-        if (!rawDate) continue;
+        const rawDate = sanitize(row[4], 20);
+        if (!rawDate) { skipped++; continue; }
         const createdAt = parseDate(rawDate);
+        if (!createdAt) {
+          console.warn(`Skipping row: invalid date "${rawDate}"`);
+          skipped++;
+          continue;
+        }
         const dateCode = formatDateCode(createdAt);
 
-        // Increment per-date seq
         dateSeq[dateCode] = (dateSeq[dateCode] ?? 0) + 1;
         const seq = String(dateSeq[dateCode]).padStart(5, '0');
         const orderCode = `ORD-${dateCode}-${seq}`;
 
         // Col 5: customer name
-        const customerName = String(row[5] ?? '').trim();
+        const customerName = sanitize(row[5], 100) || 'Khách';
 
         // Col 6: customer type
-        const rawType = String(row[6] ?? '').trim();
+        const rawType = sanitize(row[6], 20);
         const customerType = TYPE_MAP[rawType] ?? 'RETAIL';
 
-        // Col 7: phone
-        const phone = String(row[7] ?? '').trim();
+        // Col 7: phone — sanitized to safe characters only
+        const phone = sanitizePhone(row[7]);
+        if (!phone) { skipped++; continue; }
 
         // Col 8: device_name
-        const deviceName = String(row[8] ?? '').trim();
+        const deviceName = sanitize(row[8], 100) || 'Không rõ';
 
-        // Col 9: cost (in thousands VND)
+        // Col 9: cost in thousands VND
         const rawCost = row[9];
         const quotation = rawCost != null && rawCost !== '' ? Number(rawCost) * 1000 : 0;
 
@@ -150,7 +200,7 @@ async function main() {
     }
 
     console.log(`Imported: ${imported} orders (${customersUpserted} customers upserted)`);
-    console.log(`Skipped:  ${skipped} (order_code conflict)`);
+    console.log(`Skipped:  ${skipped} (conflict / invalid / unrecognized)`);
     console.log(`Errors:   ${errors}`);
   } finally {
     await pool.end();
