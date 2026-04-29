@@ -49,13 +49,6 @@ function parseDate(s: string): Date | null {
   return date;
 }
 
-function formatDateCode(date: Date): string {
-  const y = String(date.getFullYear()).slice(2);
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}${m}${d}`;
-}
-
 async function main() {
   // Guard: required env vars
   const missing = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD'].filter((k) => !process.env[k]);
@@ -107,65 +100,66 @@ async function main() {
     if (userRes.rows.length === 0) throw new Error('Run npm run seed first');
     const adminId: string = userRes.rows[0].id;
 
-    // Step 3: read Excel
+    // Step 3: read Excel — parse with header row so columns are referenced by name
     const workbook = XLSX.readFile(path.resolve(EXCEL_PATH));
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
-    const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
-
-    const dataRows = rows.slice(1) as Array<Array<string | number | null>>;
-    const dateSeq: Record<string, number> = {};
+    const dataRows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(sheet, { defval: null });
 
     let imported = 0;
     let skipped = 0;
     let errors = 0;
     let customersUpserted = 0;
+    const seenCodes = new Set<string>();
 
     for (const row of dataRows) {
       try {
-        // Col 2: status — skip rows with unrecognized status after mapping
-        const rawStatus = sanitize(row[2], 30);
-        const status = STATUS_MAP[rawStatus] ?? (KNOWN_STATUSES.has(rawStatus) ? rawStatus : null);
-        if (!status) {
-          console.warn(`Skipping row: unrecognized status "${rawStatus}"`);
+        // Order code — required, used as natural key for dedup
+        const orderCode = sanitize(row['Mã Đơn'], 30);
+        if (!orderCode) {
+          console.warn('Skipping row: missing "Mã Đơn"');
           skipped++;
           continue;
         }
 
-        // Col 3: fault_description
-        const faultDescription = sanitize(row[3], 500) || 'Nhập từ dữ liệu cũ';
+        if (seenCodes.has(orderCode)) {
+          console.warn(`Skipping row: duplicate "Mã Đơn" in file: ${orderCode}`);
+          skipped++;
+          continue;
+        }
+        seenCodes.add(orderCode);
 
-        // Col 4: date
-        const rawDate = sanitize(row[4], 20);
+        const rawStatus = sanitize(row['Trạng Thái'], 30);
+        const status = STATUS_MAP[rawStatus] ?? (KNOWN_STATUSES.has(rawStatus) ? rawStatus : null);
+        if (!status) {
+          console.warn(`Skipping row ${orderCode}: unrecognized status "${rawStatus}"`);
+          skipped++;
+          continue;
+        }
+
+        const faultDescription = sanitize(row['Ghi Chú'], 500) || 'Nhập từ dữ liệu cũ';
+
+        const rawDate = sanitize(row['Ngày Tạo'], 20);
         if (!rawDate) { skipped++; continue; }
         const createdAt = parseDate(rawDate);
         if (!createdAt) {
-          console.warn(`Skipping row: invalid date "${rawDate}"`);
+          console.warn(`Skipping row ${orderCode}: invalid date "${rawDate}"`);
           skipped++;
           continue;
         }
-        const dateCode = formatDateCode(createdAt);
 
-        dateSeq[dateCode] = (dateSeq[dateCode] ?? 0) + 1;
-        const seq = String(dateSeq[dateCode]).padStart(5, '0');
-        const orderCode = `ORD-${dateCode}-${seq}`;
+        const customerName = sanitize(row['Khách Hàng'], 100) || 'Khách';
 
-        // Col 5: customer name
-        const customerName = sanitize(row[5], 100) || 'Khách';
-
-        // Col 6: customer type
-        const rawType = sanitize(row[6], 20);
+        const rawType = sanitize(row['Loại Khách Hàng'], 20);
         const customerType = TYPE_MAP[rawType] ?? 'RETAIL';
 
-        // Col 7: phone — sanitized to safe characters only
-        const phone = sanitizePhone(row[7]);
+        const phone = sanitizePhone(row['Số Điện Thoại']);
         if (!phone) { skipped++; continue; }
 
-        // Col 8: device_name
-        const deviceName = sanitize(row[8], 100) || 'Không rõ';
+        const deviceName = sanitize(row['Tên Thiết Bị'], 100) || 'Không rõ';
 
-        // Col 9: cost in thousands VND
-        const rawCost = row[9];
+        // Cost in thousands VND
+        const rawCost = row['Chi Phí'];
         const quotation = rawCost != null && rawCost !== '' ? Number(rawCost) * 1000 : 0;
 
         // Upsert customer
