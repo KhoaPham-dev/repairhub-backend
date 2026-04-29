@@ -4,5 +4,6 @@ dist/
 uploads/
 *.js.map
 backups/
+coverage/
 .env
 uploads/
