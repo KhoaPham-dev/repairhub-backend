@@ -7,8 +7,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "seed": "ts-node scripts/seed.ts",
-    "import:march": "ts-node scripts/import-march-data.ts",
-    "import:march:run": "ts-node scripts/import-march-data.ts /Users/agile/Downloads/RepairData_Thang3.xlsx --force",
+    "import:excel": "ts-node scripts/import-excel-data.ts",
+    "import:excel:run": "ts-node scripts/import-excel-data.ts /Users/agile/Downloads/RepairData_Thang3.xlsx --cleanup --force",
     "test": "jest",
     "test:coverage": "jest --coverage"
   },
