@@ -10,11 +10,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 async function seed() {
   console.log('Running migrations...');
-  const sql = fs.readFileSync(path.join(__dirname, '../migrations/001_initial_schema.sql'), 'utf8');
+  const sql = fs.readFileSync(path.join(__dirname, '../../migrations/001_initial_schema.sql'), 'utf8');
   await pool.query(sql);
   console.log('✓ Schema ready');
 
-  const sql2 = fs.readFileSync(path.join(__dirname, '../migrations/002_feedback_round_1.sql'), 'utf8');
+  const sql2 = fs.readFileSync(path.join(__dirname, '../../migrations/002_feedback_round_1.sql'), 'utf8');
   await pool.query(sql2);
   console.log('✓ Migration 002 applied');
 
