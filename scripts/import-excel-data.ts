@@ -18,7 +18,7 @@ const STATUS_MAP: Record<string, string> = {
   DANG_SUA:   'DANG_SUA_CHUA',
   GIAO_HANG:  'DA_GIAO',
   HOAN_THANH: 'DA_GIAO',
-  TRA_KHACH:  'HUY_TRA_MAY',
+  TRA_KHACH:  'TRA_HANG',
   DA_HUY:     'HUY_TRA_MAY',
 };
 
@@ -65,14 +65,16 @@ async function main() {
 
   // Guard: Excel file path must be provided
   if (!EXCEL_PATH) {
-    throw new Error('Usage: npm run import:march <path-to-excel-file>');
+    throw new Error('Usage: npm run import:excel <path-to-excel-file> [-- --cleanup --force]');
   }
 
-  // Guard: --force flag required to prevent accidental data wipe
-  if (!process.argv.includes('--force')) {
+  const cleanup = process.argv.includes('--cleanup');
+
+  // Guard: --cleanup also requires --force to prevent accidental data wipe
+  if (cleanup && !process.argv.includes('--force')) {
     throw new Error(
-      'This script deletes ALL orders and customers. Re-run with --force to confirm:\n' +
-      '  npm run import:march <file> -- --force'
+      '--cleanup deletes ALL orders and customers. Re-run with --force to confirm:\n' +
+      '  npm run import:excel <file> -- --cleanup --force'
     );
   }
 
@@ -85,12 +87,16 @@ async function main() {
   });
 
   try {
-    // Step 1: clear existing data in FK-safe order
-    await pool.query('DELETE FROM order_images');
-    await pool.query('DELETE FROM order_status_history');
-    await pool.query('DELETE FROM orders');
-    await pool.query('DELETE FROM customers');
-    console.log('Cleared existing data.');
+    // Step 1: optionally clear existing data in FK-safe order
+    if (cleanup) {
+      await pool.query('DELETE FROM order_images');
+      await pool.query('DELETE FROM order_status_history');
+      await pool.query('DELETE FROM orders');
+      await pool.query('DELETE FROM customers');
+      console.log('Cleared existing data.');
+    } else {
+      console.log('Skipping cleanup — appending to existing data.');
+    }
 
     // Step 2: lookup prerequisites
     const branchRes = await pool.query("SELECT id FROM branches WHERE name = 'Quận 1' LIMIT 1");
