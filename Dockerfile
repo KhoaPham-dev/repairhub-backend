@@ -21,7 +21,15 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# `--include=optional` is the default but stated explicitly so npm 10+
+# definitely installs sharp's platform-specific @img/sharp-linux-* binary.
+# `npm rebuild sharp` re-runs sharp's install hook against the actual
+# container platform — defends against any optional-dep filtering quirk
+# or stale lockfile entries that would otherwise produce
+# "Could not load the 'sharp' module using the linux-x64 runtime".
+RUN npm ci --omit=dev --include=optional \
+ && npm rebuild sharp \
+ && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 COPY migrations ./migrations
