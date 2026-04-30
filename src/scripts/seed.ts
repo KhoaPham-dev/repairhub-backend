@@ -18,7 +18,7 @@ async function seed() {
   await pool.query(sql2);
   console.log('✓ Migration 002 applied');
 
-  // Default branch
+  // Default branch — used as the home branch for the admin + demo technician below
   const branch = await pool.query(`
     INSERT INTO branches (name, address, phone, manager_name)
     VALUES ('Chi nhánh chính', '123 Đường Nguyễn Huệ, TP.HCM', '0901234567', 'Nguyễn Văn A')
@@ -26,6 +26,18 @@ async function seed() {
     RETURNING id, name
   `);
   console.log(`✓ Branch: ${branch.rows[0].name} (${branch.rows[0].id})`);
+
+  // District branches (moved here from migrations/002_feedback_round_1.sql so
+  // migrations stay schema-only). Idempotent — re-running the seed is safe.
+  const districts = await pool.query(`
+    INSERT INTO branches (name, address, phone, manager_name)
+    VALUES
+      ('Quận 1', '123 Đường Lê Lợi, Quận 1, TP.HCM', '0281234001', 'Quản lý Quận 1'),
+      ('Quận 9', '456 Đường Nguyễn Xiển, Quận 9, TP.HCM', '0281234009', 'Quản lý Quận 9')
+    ON CONFLICT (name) DO NOTHING
+    RETURNING id, name
+  `);
+  for (const row of districts.rows) console.log(`✓ Branch: ${row.name} (${row.id})`);
 
   // Admin user
   const hash = await bcrypt.hash('admin123', 10);
