@@ -298,14 +298,21 @@ router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
     sets.push(`warranty_period_months = $${idx}`); params.push(warranty_period_months); idx++;
   }
 
-  if (params.length === 0) {
+  // RH-63: notes-only updates are valid — they record a history row even
+  // when no scalar order field changed. Reject only when neither scalar
+  // field nor notes were provided.
+  const hasFieldUpdate = params.length > 0;
+  const hasNotes = !!(notes && notes.trim());
+  if (!hasFieldUpdate && !hasNotes) {
     res.status(400).json({ success: false, data: null, error: 'Không có dữ liệu cập nhật' }); return;
   }
 
-  params.push(req.params.id);
-  await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idx}`, params);
+  if (hasFieldUpdate) {
+    params.push(req.params.id);
+    await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idx}`, params);
+  }
 
-  if (notes) {
+  if (hasNotes) {
     await pool.query(
       `INSERT INTO order_status_history (order_id, changed_by, old_status, new_status, notes)
        VALUES ($1,$2,$3,$3,$4)`,
