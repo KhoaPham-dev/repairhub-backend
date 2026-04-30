@@ -9,7 +9,7 @@
     "seed": "ts-node src/scripts/seed.ts",
     "seed:prod": "node dist/scripts/seed.js",
     "import:excel": "ts-node scripts/import-excel-data.ts",
-    "import:excel:run": "ts-node scripts/import-excel-data.ts /Users/agile/Downloads/RepairData_Thang3.xlsx --cleanup --force",
+    "import:excel:run": "ts-node scripts/import-excel-data.ts --cleanup --force",
     "test": "jest",
     "test:coverage": "jest --coverage"
   },
