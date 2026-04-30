@@ -35,7 +35,7 @@ router.post('/login', asyncHandler(async (req: Request, res: Response) => {
   }
 
   const secret = process.env.JWT_SECRET || 'change-me';
-  const timeoutMinutes = 30;
+  const timeoutMinutes = 9999;
 
   const token = jwt.sign(
     { id: user.id, username: user.username, role: user.role, branch_id: user.branch_id },
