@@ -49,6 +49,23 @@ function parseDate(s: string): Date | null {
   return date;
 }
 
+// Generate ORD-YYYYMMDD-NNNNN matching src/routes/orders.ts:generateOrderCode.
+function generateOrderCode(date: Date): string {
+  const ymd = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+  const seq = String(Math.floor(Math.random() * 99999) + 1).padStart(5, '0');
+  return `ORD-${ymd}-${seq}`;
+}
+
+// Increment the LAST digit run in an order code, preserving zero-padding.
+// "ORD-20260101-00050" -> "ORD-20260101-00051"
+// "ORD-20260101-00050-BH" -> "ORD-20260101-00051-BH"
+function bumpOrderCode(code: string): string {
+  const m = code.match(/^(.*?)(\d+)([^\d]*)$/);
+  if (!m) return `${code}-1`;
+  const next = String(Number(m[2]) + 1).padStart(m[2].length, '0');
+  return m[1] + next + m[3];
+}
+
 async function main() {
   // Guard: required env vars
   const missing = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD'].filter((k) => !process.env[k]);
@@ -112,41 +129,57 @@ async function main() {
     let customersUpserted = 0;
     const seenCodes = new Set<string>();
 
+    let coerced = 0;
+
     for (const row of dataRows) {
       try {
-        // Order code — required, used as natural key for dedup
-        const orderCode = sanitize(row['Mã Đơn'], 30);
-        if (!orderCode) {
-          console.warn('Skipping row: missing "Mã Đơn"');
-          skipped++;
-          continue;
+        // --- Date: parse first so we can use it for code generation if needed ---
+        // Missing or invalid date is no longer fatal — we fall back to "now".
+        const rawDate = sanitize(row['Ngày Tạo'], 20);
+        let createdAt: Date;
+        if (!rawDate) {
+          createdAt = new Date();
+          coerced++;
+        } else {
+          const parsed = parseDate(rawDate);
+          if (!parsed) {
+            console.warn(`Row: invalid date "${rawDate}", using now`);
+            createdAt = new Date();
+            coerced++;
+          } else {
+            createdAt = parsed;
+          }
         }
 
+        // --- Order code: generate one if missing, bump if a duplicate within this file ---
+        let orderCode = sanitize(row['Mã Đơn'], 30);
+        if (!orderCode) {
+          orderCode = generateOrderCode(createdAt);
+          console.warn(`Row missing "Mã Đơn", generated: ${orderCode}`);
+          coerced++;
+        }
         if (seenCodes.has(orderCode)) {
-          console.warn(`Skipping row: duplicate "Mã Đơn" in file: ${orderCode}`);
-          skipped++;
-          continue;
+          const original = orderCode;
+          while (seenCodes.has(orderCode)) {
+            orderCode = bumpOrderCode(orderCode);
+          }
+          console.warn(`Row: duplicate "Mã Đơn" ${original} in file, renamed to ${orderCode}`);
+          coerced++;
         }
         seenCodes.add(orderCode);
 
+        // --- Status: default to TIEP_NHAN if unrecognized ---
         const rawStatus = sanitize(row['Trạng Thái'], 30);
-        const status = STATUS_MAP[rawStatus] ?? (KNOWN_STATUSES.has(rawStatus) ? rawStatus : null);
+        let status = STATUS_MAP[rawStatus] ?? (KNOWN_STATUSES.has(rawStatus) ? rawStatus : null);
         if (!status) {
-          console.warn(`Skipping row ${orderCode}: unrecognized status "${rawStatus}"`);
-          skipped++;
-          continue;
+          if (rawStatus) {
+            console.warn(`Row ${orderCode}: unrecognized status "${rawStatus}", defaulting to TIEP_NHAN`);
+          }
+          status = 'TIEP_NHAN';
+          coerced++;
         }
 
         const faultDescription = sanitize(row['Ghi Chú'], 500) || 'Nhập từ dữ liệu cũ';
-
-        const rawDate = sanitize(row['Ngày Tạo'], 20);
-        if (!rawDate) { skipped++; continue; }
-        const createdAt = parseDate(rawDate);
-        if (!createdAt) {
-          console.warn(`Skipping row ${orderCode}: invalid date "${rawDate}"`);
-          skipped++;
-          continue;
-        }
 
         const customerName = sanitize(row['Khách Hàng'], 100) || 'Khách';
 
@@ -200,7 +233,8 @@ async function main() {
     }
 
     console.log(`Imported: ${imported} orders (${customersUpserted} customers upserted)`);
-    console.log(`Skipped:  ${skipped} (conflict / invalid / unrecognized)`);
+    console.log(`Skipped:  ${skipped} (missing phone / DB conflict)`);
+    console.log(`Coerced:  ${coerced} fields auto-filled (missing/invalid order code, date, or status)`);
     console.log(`Errors:   ${errors}`);
   } finally {
     await pool.end();
