@@ -67,10 +67,14 @@ function bumpOrderCode(code: string): string {
 }
 
 async function main() {
-  // Guard: required env vars
-  const missing = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD'].filter((k) => !process.env[k]);
-  if (missing.length > 0) {
-    throw new Error(`Missing required env vars: ${missing.join(', ')}. Check your .env file.`);
+  // Guard: must have either DATABASE_URL (preferred — matches the rest of the
+  // backend) or the four discrete DB_* vars as a fallback.
+  const hasDatabaseUrl = !!process.env.DATABASE_URL;
+  const discreteMissing = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD'].filter((k) => !process.env[k]);
+  if (!hasDatabaseUrl && discreteMissing.length > 0) {
+    throw new Error(
+      `No DB connection info. Set DATABASE_URL, or all of: ${discreteMissing.join(', ')}.`
+    );
   }
 
   // Guard: Excel file path must be provided
@@ -88,13 +92,17 @@ async function main() {
     );
   }
 
-  const pool = new Pool({
-    host:     process.env.DB_HOST,
-    port:     Number(process.env.DB_PORT) || 5432,
-    database: process.env.DB_NAME,
-    user:     process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-  });
+  // Prefer DATABASE_URL when set (matches seed.ts, the server, the entrypoint).
+  // Fall back to discrete DB_* vars for backwards-compat with older .env files.
+  const pool = hasDatabaseUrl
+    ? new Pool({ connectionString: process.env.DATABASE_URL })
+    : new Pool({
+        host:     process.env.DB_HOST,
+        port:     Number(process.env.DB_PORT) || 5432,
+        database: process.env.DB_NAME,
+        user:     process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+      });
 
   try {
     // Step 1: optionally clear existing data in FK-safe order
