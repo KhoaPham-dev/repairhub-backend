@@ -45,11 +45,20 @@ function generateOrderCode(): string {
 }
 
 router.get('/', asyncHandler(async (req: Request, res: Response) => {
-  const { status, branch_id, search, sort = 'desc', limit = '20', offset = '0' } = req.query;
+  const { status, exclude_status, branch_id, search, sort = 'desc', limit = '20', offset = '0' } = req.query;
   const params: unknown[] = [];
   let where = 'WHERE 1=1';
 
   if (status) { params.push(status); where += ` AND o.status = $${params.length}`; }
+  // exclude_status: comma-separated list of statuses to exclude.
+  // FE uses this on the "Tất cả" tab to hide terminal orders (DA_GIAO, HUY_TRA_MAY).
+  if (exclude_status) {
+    const excludeList = String(exclude_status).split(',').map((s) => s.trim()).filter(Boolean);
+    if (excludeList.length > 0) {
+      const placeholders = excludeList.map((s) => { params.push(s); return `$${params.length}`; }).join(',');
+      where += ` AND o.status NOT IN (${placeholders})`;
+    }
+  }
   if (branch_id) { params.push(branch_id); where += ` AND o.branch_id = $${params.length}`; }
   if (search) {
     params.push(`%${search}%`);

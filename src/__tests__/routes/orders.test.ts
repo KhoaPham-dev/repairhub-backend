@@ -76,6 +76,21 @@ describe('GET /api/orders', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data[0].priority).toBeDefined();
   });
+
+  it('exclude_status pushes a NOT IN clause with each status as a parameter', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get('/api/orders?exclude_status=DA_GIAO,HUY_TRA_MAY')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toMatch(/o\.status NOT IN \(\$\d+,\$\d+\)/);
+    expect(params).toContain('DA_GIAO');
+    expect(params).toContain('HUY_TRA_MAY');
+  });
 });
 
 describe('GET /api/orders/status-counts', () => {
