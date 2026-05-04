@@ -77,6 +77,18 @@ describe('GET /api/orders', () => {
     expect(res.body.data[0].priority).toBeDefined();
   });
 
+  it('search clause includes device_name match', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get('/api/orders?search=Loa+JBL')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const sql = mockQuery.mock.calls[0][0] as string;
+    expect(sql).toMatch(/o\.device_name ILIKE/);
+  });
+
   it('exclude_status pushes a NOT IN clause with each status as a parameter', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [] })

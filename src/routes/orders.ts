@@ -62,7 +62,8 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
   if (branch_id) { params.push(branch_id); where += ` AND o.branch_id = $${params.length}`; }
   if (search) {
     params.push(`%${search}%`);
-    where += ` AND (c.phone ILIKE $${params.length} OR o.serial_imei ILIKE $${params.length} OR o.order_code ILIKE $${params.length} OR c.name ILIKE $${params.length})`;
+    // Searches: customer phone/name, serial/IMEI, order code, AND device name.
+    where += ` AND (c.phone ILIKE $${params.length} OR o.serial_imei ILIKE $${params.length} OR o.order_code ILIKE $${params.length} OR c.name ILIKE $${params.length} OR o.device_name ILIKE $${params.length})`;
   }
 
   const orderDir = sort === 'asc' ? 'ASC' : 'DESC';
