@@ -159,9 +159,31 @@ describe('POST /api/orders', () => {
     expect(res.status).toBe(400);
   });
 
-  it('creates order and returns 201', async () => {
-    const created = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
+  it('returns order_code in YYYYMMDD-NNNNN format (RH-67)', async () => {
+    // Counter returns 0 → expect a 5-digit zero-padded suffix.
+    const created = { id: 'oN', order_code: '20260101-00000', status: 'TIEP_NHAN' };
     mockQuery
+      .mockResolvedValueOnce({ rows: [{ last_issued: 0 }] })
+      .mockResolvedValueOnce({ rows: [created] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        customer_id: 'c1', branch_id: 'b1', product_type: 'SPEAKER',
+        device_name: 'X', fault_description: 'y',
+      });
+    expect(res.status).toBe(201);
+    // Counter SQL should have been called with the current UTC+7 year.
+    const counterSql = mockQuery.mock.calls[0][0] as string;
+    expect(counterSql).toMatch(/order_code_counters/);
+    expect(counterSql).toMatch(/ON CONFLICT \(year\) DO UPDATE/);
+  });
+
+  it('creates order and returns 201', async () => {
+    const created = { id: 'o1', order_code: '20260425-00000', status: 'TIEP_NHAN' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ last_issued: 0 }] }) // counter reservation (RH-67)
       .mockResolvedValueOnce({ rows: [created] }) // INSERT orders
       .mockResolvedValueOnce({ rows: [] }); // INSERT order_status_history
     const res = await request(buildApp())
@@ -177,12 +199,13 @@ describe('POST /api/orders', () => {
         warranty_period_months: 6,
       });
     expect(res.status).toBe(201);
-    expect(res.body.data.order_code).toMatch(/ORD-/);
+    expect(res.body.data.order_code).toMatch(/^\d{8}-\d{5}$/);
   });
 
   it('creates order with default warranty_period_months when not provided', async () => {
-    const created = { id: 'o2', order_code: 'ORD-20260425-00002', status: 'TIEP_NHAN' };
+    const created = { id: 'o2', order_code: '20260425-00001', status: 'TIEP_NHAN' };
     mockQuery
+      .mockResolvedValueOnce({ rows: [{ last_issued: 1 }] }) // counter reservation
       .mockResolvedValueOnce({ rows: [created] })
       .mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp())
@@ -302,8 +325,12 @@ describe('POST /api/orders/bulk', () => {
   });
 
   it('creates multiple orders and returns 201 with all created', async () => {
-    const order1 = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
-    const order2 = { id: 'o2', order_code: 'ORD-20260425-00002', status: 'TIEP_NHAN' };
+    const order1 = { id: 'o1', order_code: '20260425-00000', status: 'TIEP_NHAN' };
+    const order2 = { id: 'o2', order_code: '20260425-00001', status: 'TIEP_NHAN' };
+    // Counter reservation happens on the pool (not the tx client) — one per product.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ last_issued: 0 }] })
+      .mockResolvedValueOnce({ rows: [{ last_issued: 1 }] });
     mockClientQuery
       .mockResolvedValueOnce({ rows: [] })        // BEGIN
       .mockResolvedValueOnce({ rows: [order1] })  // INSERT order 1
@@ -324,13 +351,14 @@ describe('POST /api/orders/bulk', () => {
       });
     expect(res.status).toBe(201);
     expect(res.body.data).toHaveLength(2);
-    expect(res.body.data[0].order_code).toBe('ORD-20260425-00001');
-    expect(res.body.data[1].order_code).toBe('ORD-20260425-00002');
+    expect(res.body.data[0].order_code).toMatch(/^\d{8}-\d{5}$/);
+    expect(res.body.data[1].order_code).toMatch(/^\d{8}-\d{5}$/);
     expect(mockLogActivity).toHaveBeenCalledTimes(2);
   });
 
   it('creates single order in bulk and returns 201', async () => {
-    const order = { id: 'o1', order_code: 'ORD-20260425-00001', status: 'TIEP_NHAN' };
+    const order = { id: 'o1', order_code: '20260425-00000', status: 'TIEP_NHAN' };
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_issued: 0 }] });  // counter
     mockClientQuery
       .mockResolvedValueOnce({ rows: [] })       // BEGIN
       .mockResolvedValueOnce({ rows: [order] })  // INSERT order

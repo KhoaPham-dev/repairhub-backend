@@ -37,11 +37,32 @@ const STATUS_FLOW = [
 ];
 const TERMINAL_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
 
-function generateOrderCode(): string {
-  const d = new Date();
-  const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const seq = String(Math.floor(Math.random() * 99999) + 1).padStart(5, '0');
-  return `ORD-${date}-${seq}`;
+// Compute year + YYYYMMDD in Asia/Ho_Chi_Minh (UTC+7) so the annual reset
+// and the date prefix match the operator's calendar, not the server clock.
+// 'sv-SE' locale yields ISO-like output ("2026-05-05 14:30:00") which is easy
+// to slice without locale surprises.
+export function vnDateParts(d: Date = new Date()): { year: number; ymd: string } {
+  const iso = d.toLocaleString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+  const [year, month, day] = iso.split(' ')[0].split('-');
+  return { year: Number(year), ymd: `${year}${month}${day}` };
+}
+
+// Reserve the next sequence value atomically. The INSERT ... ON CONFLICT
+// DO UPDATE RETURNING pattern serializes concurrent writers via row-level
+// locking on the matching counter row. See ADR-0004.
+export async function generateOrderCode(now: Date = new Date()): Promise<string> {
+  const { year, ymd } = vnDateParts(now);
+  const result = await pool.query<{ last_issued: number }>(
+    `INSERT INTO order_code_counters (year, last_issued)
+     VALUES ($1, 0)
+     ON CONFLICT (year) DO UPDATE
+     SET last_issued = order_code_counters.last_issued + 1,
+         updated_at = NOW()
+     RETURNING last_issued`,
+    [year]
+  );
+  const seq = String(result.rows[0].last_issued).padStart(5, '0');
+  return `${ymd}-${seq}`;
 }
 
 router.get('/', asyncHandler(async (req: Request, res: Response) => {
@@ -139,7 +160,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  const orderCode = generateOrderCode();
+  const orderCode = await generateOrderCode();
   const result = await pool.query(
     `INSERT INTO orders
        (order_code, customer_id, branch_id, created_by, product_type, device_name,
@@ -238,7 +259,7 @@ router.post('/bulk', asyncHandler(async (req: Request, res: Response) => {
       res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin sản phẩm' });
       return;
     }
-    const orderCode = generateOrderCode();
+    const orderCode = await generateOrderCode();
     const result = await client.query(
       `INSERT INTO orders
          (order_code, customer_id, branch_id, created_by, product_type, device_name,
