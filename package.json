@@ -12,6 +12,9 @@
     "import:excel:dev": "ts-node src/scripts/import-excel-data.ts",
     "import:excel:staging": "node dist/scripts/import-excel-data.js",
     "import:excel:prod": "node dist/scripts/import-excel-data.js",
+    "order-code:rewrite:dev": "ts-node src/scripts/rewrite-order-codes.ts",
+    "order-code:rewrite:staging": "node dist/scripts/rewrite-order-codes.js",
+    "order-code:rewrite:prod": "node dist/scripts/rewrite-order-codes.js",
     "test": "jest",
     "test:coverage": "jest --coverage"
   },
