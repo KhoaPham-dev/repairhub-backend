@@ -85,14 +85,15 @@ describe('GET /api/dashboard/revenue?period=today', () => {
 });
 
 describe('GET /api/dashboard/revenue?period=month', () => {
-  it('returns items for the current month', async () => {
-    // April has 30 days
-    const monthRows = Array.from({ length: 30 }, (_, i) => ({
-      date: `2026-04-${String(i + 1).padStart(2, '0')}`,
-      dow: String(((2 + i) % 7)), // arbitrary DOW sequence
-      revenue: String(i * 10000),
-    }));
-    mockQuery.mockResolvedValueOnce({ rows: monthRows });
+  it('returns exactly 4 weekly items with correct T1–T4 labels', async () => {
+    // Fixed query uses (VALUES (1),(2),(3),(4)) — DB returns 4 aggregated rows
+    const weekRows = [
+      { week_num: '1', revenue: '100000' },
+      { week_num: '2', revenue: '200000' },
+      { week_num: '3', revenue: '300000' },
+      { week_num: '4', revenue: '400000' },
+    ];
+    mockQuery.mockResolvedValueOnce({ rows: weekRows });
 
     const res = await request(buildApp())
       .get('/api/dashboard/revenue?period=month')
@@ -101,13 +102,42 @@ describe('GET /api/dashboard/revenue?period=month', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(Array.isArray(res.body.data)).toBe(true);
-    expect(res.body.data.length).toBeGreaterThan(0);
-    // Each item should have the required shape
-    for (const item of res.body.data) {
-      expect(item).toHaveProperty('day');
-      expect(item).toHaveProperty('date');
-      expect(item).toHaveProperty('revenue');
-    }
+
+    // Must be exactly 4 items — one per calendar week
+    expect(res.body.data).toHaveLength(4);
+
+    // Labels must be T1, T2, T3, T4
+    expect(res.body.data.map((d: { day: string }) => d.day)).toEqual(['T1', 'T2', 'T3', 'T4']);
+
+    // date labels
+    expect(res.body.data.map((d: { date: string }) => d.date)).toEqual([
+      'Tuần 1', 'Tuần 2', 'Tuần 3', 'Tuần 4',
+    ]);
+
+    // Revenue values must match the DB rows exactly (no multiplication)
+    expect(res.body.data[0].revenue).toBe(100000);
+    expect(res.body.data[1].revenue).toBe(200000);
+    expect(res.body.data[2].revenue).toBe(300000);
+    expect(res.body.data[3].revenue).toBe(400000);
+  });
+
+  it('returns 4 items even when some weeks have zero revenue', async () => {
+    const weekRows = [
+      { week_num: '1', revenue: '50000' },
+      { week_num: '2', revenue: '0' },
+      { week_num: '3', revenue: '0' },
+      { week_num: '4', revenue: '75000' },
+    ];
+    mockQuery.mockResolvedValueOnce({ rows: weekRows });
+
+    const res = await request(buildApp())
+      .get('/api/dashboard/revenue?period=month')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(4);
+    expect(res.body.data[1].revenue).toBe(0);
+    expect(res.body.data[2].revenue).toBe(0);
   });
 });
 
