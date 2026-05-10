@@ -401,7 +401,8 @@ describe('GET /api/reports/partner', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('spreadsheetml');
     expect(res.headers['content-disposition']).toContain('attachment');
-    expect(res.headers['content-disposition']).toContain('partner-report-Cong-Ty-ABC-2026-04-01-2026-04-30.xlsx');
+    // filename uses normalized start (startNorm) and endNorm (end + 1 day for inclusive range)
+    expect(res.headers['content-disposition']).toContain('partner-report-Cong-Ty-ABC-2026-04-01-2026-05-01.xlsx');
     expect(res.body).toBeTruthy();
   });
 

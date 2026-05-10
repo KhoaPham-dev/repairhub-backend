@@ -60,6 +60,110 @@ router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
 
+// GET /partner — generate and stream a partner report as an Excel file
+router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
+  const { partner_id, start, end } = req.query as { partner_id?: string; start?: string; end?: string };
+
+  // Validate required params
+  if (!partner_id || !start || !end) {
+    res.status(400).json({ success: false, data: null, error: 'Thiếu tham số bắt buộc: partner_id, start, end' });
+    return;
+  }
+
+  // Validate UUID
+  if (!UUID_RE.test(partner_id)) {
+    res.status(400).json({ success: false, data: null, error: 'partner_id không hợp lệ' });
+    return;
+  }
+
+  // Validate dates
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  if (isNaN(startDate.getTime())) {
+    res.status(400).json({ success: false, data: null, error: 'Ngày bắt đầu không hợp lệ' });
+    return;
+  }
+  if (isNaN(endDate.getTime())) {
+    res.status(400).json({ success: false, data: null, error: 'Ngày kết thúc không hợp lệ' });
+    return;
+  }
+  if (endDate < startDate) {
+    res.status(400).json({ success: false, data: null, error: 'Ngày kết thúc phải >= ngày bắt đầu' });
+    return;
+  }
+
+  // Normalize validated dates to YYYY-MM-DD strings for DB query
+  const startNorm = startDate.toISOString().slice(0, 10);
+  const endDate2 = new Date(endDate);
+  endDate2.setDate(endDate2.getDate() + 1);
+  const endNorm = endDate2.toISOString().slice(0, 10);
+
+  // Check partner existence
+  const partnerResult = await pool.query(
+    `SELECT id, full_name FROM customers WHERE id = $1 AND customer_type = 'partner'`,
+    [partner_id]
+  );
+  if (partnerResult.rows.length === 0) {
+    res.status(404).json({ success: false, data: null, error: 'Đối tác không tồn tại' });
+    return;
+  }
+  const partner = partnerResult.rows[0] as { id: string; full_name: string };
+
+  // Query orders using normalized date strings
+  const ordersResult = await pool.query(
+    `SELECT
+       o.order_code,
+       o.status,
+       o.notes,
+       o.created_at,
+       o.device_name,
+       o.quotation
+     FROM orders o
+     WHERE o.customer_id = $1
+       AND o.customer_type = 'partner'
+       AND o.created_at >= $2
+       AND o.created_at < $3
+     ORDER BY o.created_at ASC`,
+    [partner_id, startNorm, endNorm]
+  );
+
+  // Build Excel workbook in memory
+  const wb = XLSX.utils.book_new();
+
+  const headerRows: (string | number | null)[][] = [
+    [`Đối tác: ${partner.full_name} | Kỳ: ${start} – ${end}`],
+    [],
+    ['Mã đơn', 'Trạng thái', 'Ghi chú', 'Ngày tạo', 'Thiết bị', 'Báo giá'],
+  ];
+
+  const dataRows: (string | number | null)[][] = ordersResult.rows.map((row) => {
+    const createdAt = new Date(row.created_at).toLocaleDateString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+    return [
+      row.order_code,
+      row.status,
+      row.notes ?? '',
+      createdAt,
+      row.device_name ?? '',
+      row.quotation !== null ? parseFloat(row.quotation) : 0,
+    ];
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet([...headerRows, ...dataRows]);
+  XLSX.utils.book_append_sheet(wb, ws, 'Chi tiết đơn hàng');
+
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+
+  // Sanitize partner name for use in Content-Disposition filename header
+  const safeName = (partner.full_name as string)
+    .replace(/[^\wÀ-ɏ\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .slice(0, 80);
+  const filename = `partner-report-${safeName}-${startNorm}-${endNorm}.xlsx`;
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buffer);
+}));
+
 // GET /:id/download — stream the Excel file
 router.get('/:id/download', asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -96,103 +200,6 @@ router.get('/:id/download', asyncHandler(async (req: Request, res: Response) => 
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   fs.createReadStream(resolved).pipe(res);
-}));
-
-// GET /partner — generate and stream a partner report as an Excel file
-router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
-  const { partner_id, start, end } = req.query as { partner_id?: string; start?: string; end?: string };
-
-  // Validate required params
-  if (!partner_id || !start || !end) {
-    res.status(400).json({ success: false, data: null, error: 'Thiếu tham số bắt buộc: partner_id, start, end' });
-    return;
-  }
-
-  // Validate UUID
-  if (!UUID_RE.test(partner_id)) {
-    res.status(400).json({ success: false, data: null, error: 'partner_id không hợp lệ' });
-    return;
-  }
-
-  // Validate dates
-  const startDate = new Date(start);
-  const endDate = new Date(end);
-  if (isNaN(startDate.getTime())) {
-    res.status(400).json({ success: false, data: null, error: 'Ngày bắt đầu không hợp lệ' });
-    return;
-  }
-  if (isNaN(endDate.getTime())) {
-    res.status(400).json({ success: false, data: null, error: 'Ngày kết thúc không hợp lệ' });
-    return;
-  }
-  if (endDate < startDate) {
-    res.status(400).json({ success: false, data: null, error: 'Ngày kết thúc phải >= ngày bắt đầu' });
-    return;
-  }
-
-  // Check partner existence
-  const partnerResult = await pool.query(
-    `SELECT id, full_name FROM customers WHERE id = $1 AND customer_type = 'partner'`,
-    [partner_id]
-  );
-  if (partnerResult.rows.length === 0) {
-    res.status(404).json({ success: false, data: null, error: 'Đối tác không tồn tại' });
-    return;
-  }
-  const partner = partnerResult.rows[0] as { id: string; full_name: string };
-
-  // Compute end + 1 day for inclusive range
-  const endPlusOne = new Date(endDate);
-  endPlusOne.setDate(endPlusOne.getDate() + 1);
-
-  // Query orders
-  const ordersResult = await pool.query(
-    `SELECT
-       o.order_code,
-       o.status,
-       o.notes,
-       o.created_at,
-       o.device_name,
-       o.quotation
-     FROM orders o
-     WHERE o.customer_id = $1
-       AND o.customer_type = 'partner'
-       AND o.created_at >= $2
-       AND o.created_at < $3
-     ORDER BY o.created_at ASC`,
-    [partner_id, start, endPlusOne.toISOString().slice(0, 10)]
-  );
-
-  // Build Excel workbook in memory
-  const wb = XLSX.utils.book_new();
-
-  const headerRows: (string | number | null)[][] = [
-    [`Đối tác: ${partner.full_name} | Kỳ: ${start} – ${end}`],
-    [],
-    ['Mã đơn', 'Trạng thái', 'Ghi chú', 'Ngày tạo', 'Thiết bị', 'Báo giá'],
-  ];
-
-  const dataRows: (string | number | null)[][] = ordersResult.rows.map((row) => {
-    const createdAt = new Date(row.created_at).toLocaleDateString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
-    return [
-      row.order_code,
-      row.status,
-      row.notes ?? '',
-      createdAt,
-      row.device_name ?? '',
-      row.quotation !== null ? parseFloat(row.quotation) : 0,
-    ];
-  });
-
-  const ws = XLSX.utils.aoa_to_sheet([...headerRows, ...dataRows]);
-  XLSX.utils.book_append_sheet(wb, ws, 'Chi tiết đơn hàng');
-
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-
-  const filename = `partner-report-${partner.full_name.replace(/\s+/g, '-')}-${start}-${end}.xlsx`;
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(buffer);
 }));
 
 export default router;
