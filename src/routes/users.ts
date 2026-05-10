@@ -6,16 +6,16 @@ import { logActivity } from '../utils/activityLog';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
-router.use(authenticate, requireAdmin);
+router.use(authenticate);
 
-router.get('/', asyncHandler(async (req: Request, res: Response) => {
+router.get('/', requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
   const result = await pool.query(
     'SELECT id, username, full_name, role, branch_id, is_active, created_at FROM users ORDER BY created_at DESC'
   );
   res.json({ success: true, data: result.rows, error: null });
 }));
 
-router.post('/', asyncHandler(async (req: Request, res: Response) => {
+router.post('/', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const { username, password, full_name, role, branch_id } = req.body as {
     username: string; password: string; full_name: string;
     role: 'ADMIN' | 'TECHNICIAN'; branch_id?: string;
@@ -40,7 +40,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   if (!UUID_RE.test(req.params.id)) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' }); return; }
   const { full_name, role, branch_id, is_active } = req.body as {
     full_name?: string; role?: string; branch_id?: string; is_active?: boolean;
@@ -63,7 +63,7 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: result.rows[0], error: null });
 }));
 
-router.post('/:id/reset-password', asyncHandler(async (req: Request, res: Response) => {
+router.post('/:id/reset-password', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const { password } = req.body as { password: string };
   if (!password) { res.status(400).json({ success: false, data: null, error: 'Mật khẩu không được để trống' }); return; }
 
@@ -73,7 +73,32 @@ router.post('/:id/reset-password', asyncHandler(async (req: Request, res: Respon
   res.json({ success: true, data: null, error: null });
 }));
 
-router.get('/activity-log', asyncHandler(async (req: Request, res: Response) => {
+// PATCH /:id/password — accessible by authenticated users.
+// Admin: can change any user's password.
+// Technician: can only change own password.
+router.patch('/:id/password', asyncHandler(async (req: Request, res: Response) => {
+  const { newPassword } = req.body as { newPassword?: string };
+
+  if (!newPassword || newPassword.length < 8) {
+    res.status(400).json({ success: false, data: null, error: 'Mật khẩu phải có ít nhất 8 ký tự' });
+    return;
+  }
+
+  const isAdmin = req.user!.role === 'ADMIN';
+  const isSelf = req.params.id === req.user!.id;
+
+  if (!isAdmin && !isSelf) {
+    res.status(403).json({ success: false, data: null, error: 'Không có quyền đổi mật khẩu người dùng khác' });
+    return;
+  }
+
+  const hash = await bcrypt.hash(newPassword, 10);
+  await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
+  await logActivity(req.user!.id, 'CHANGE_PASSWORD', 'user', req.params.id);
+  res.status(204).send();
+}));
+
+router.get('/activity-log', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const offset = Number(req.query.offset) || 0;
 
@@ -88,7 +113,7 @@ router.get('/activity-log', asyncHandler(async (req: Request, res: Response) => 
   res.json({ success: true, data: result.rows, error: null });
 }));
 
-router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   if (!UUID_RE.test(req.params.id)) {
     res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' });
     return;

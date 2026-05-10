@@ -401,9 +401,9 @@ router.post('/:id/images', upload.array('images', 10), asyncHandler(async (req: 
     res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' });
     return;
   }
+  const isTechnician = req.user!.role === 'TECHNICIAN';
   const isAdmin = req.user!.role === 'ADMIN';
-  const isCreator = orderCheck.rows[0].created_by === req.user!.id;
-  if (!isAdmin && !isCreator) {
+  if (!isAdmin && !isTechnician) {
     res.status(403).json({ success: false, data: null, error: 'Không có quyền tải ảnh cho đơn này' });
     return;
   }

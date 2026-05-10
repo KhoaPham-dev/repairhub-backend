@@ -139,6 +139,64 @@ describe('GET /api/users/activity-log', () => {
   });
 });
 
+describe('PATCH /api/users/:id/password', () => {
+  const targetId = '55555555-5555-5555-5555-555555555555';
+  const techId = 'u2';
+  const techSelfToken = jwt.sign({ id: techId, username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
+
+  it('returns 400 when newPassword is missing', async () => {
+    const res = await request(buildApp())
+      .patch(`/api/users/${targetId}/password`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/8/);
+  });
+
+  it('returns 400 when newPassword is fewer than 8 characters', async () => {
+    const res = await request(buildApp())
+      .patch(`/api/users/${targetId}/password`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'short' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/8/);
+  });
+
+  it('admin can change any user password — returns 204', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+    const res = await request(buildApp())
+      .patch(`/api/users/${targetId}/password`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(204);
+  });
+
+  it('technician can change own password — returns 204', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+    const res = await request(buildApp())
+      .patch(`/api/users/${techId}/password`)
+      .set('Authorization', `Bearer ${techSelfToken}`)
+      .send({ newPassword: 'mypassword1' });
+    expect(res.status).toBe(204);
+  });
+
+  it('technician cannot change another user password — returns 403', async () => {
+    const res = await request(buildApp())
+      .patch(`/api/users/${targetId}/password`)
+      .set('Authorization', `Bearer ${techSelfToken}`)
+      .send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/quyền/);
+  });
+
+  it('returns 401 without token', async () => {
+    const res = await request(buildApp())
+      .patch(`/api/users/${targetId}/password`)
+      .send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('DELETE /api/users/:id', () => {
   const otherId = '44444444-4444-4444-4444-444444444444';
 
