@@ -24,27 +24,45 @@ import fs from 'fs';
 const mockQuery = pool.query as jest.Mock;
 const mockWriteFile = XLSX.writeFile as jest.Mock;
 const mockMkdirSync = fs.mkdirSync as jest.Mock;
+const mockBookAppendSheet = XLSX.utils.book_append_sheet as jest.Mock;
+const mockAoaToSheet = XLSX.utils.aoa_to_sheet as jest.Mock;
 
 const REPORT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const periodStart = new Date('2026-04-01');
 const periodEnd = new Date('2026-04-14');
 
+// Reusable detail row fixture
+const detailRow = {
+  order_code: 'ORD-001',
+  status: 'completed',
+  notes: 'Fast repair',
+  created_at: new Date('2026-04-05T10:00:00Z'),
+  customer_type: 'individual',
+  device_name: 'iPhone 14',
+  quotation: '500000',
+  customer_name: 'Nguyen Van A',
+  phone: '0901234567',
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockMkdirSync.mockImplementation(() => undefined);
   mockWriteFile.mockImplementation(() => undefined);
+  // aoa_to_sheet returns a unique object each call so book_append_sheet gets distinct sheets
+  mockAoaToSheet.mockImplementation(() => ({}));
 });
 
 describe('generateRevenueReport', () => {
-  it('inserts pending row, queries orders, writes Excel, updates to done, returns id', async () => {
+  it('inserts pending row, queries orders (summary + detail), writes Excel, updates to done, returns id', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })   // INSERT
-      .mockResolvedValueOnce({                                  // SELECT orders
+      .mockResolvedValueOnce({                                  // SELECT summary
         rows: [
           { status: 'completed', order_count: '10', total_revenue: '5000000' },
           { status: 'pending',   order_count: '3',  total_revenue: '0' },
         ],
       })
+      .mockResolvedValueOnce({ rows: [detailRow] })             // SELECT detail
       .mockResolvedValueOnce({ rows: [] });                     // UPDATE done
 
     const id = await generateRevenueReport(periodStart, periodEnd, 'user-1');
@@ -58,19 +76,26 @@ describe('generateRevenueReport', () => {
       ['2026-04-01', '2026-04-14', 'user-1']
     );
 
-    // SELECT orders with date range
+    // SELECT summary
     expect(mockQuery).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('FROM orders'),
       ['2026-04-01', '2026-04-14']
     );
 
-    // XLSX.writeFile called
+    // SELECT detail (joins customers)
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('LEFT JOIN customers'),
+      ['2026-04-01', '2026-04-14']
+    );
+
+    // XLSX.writeFile called once
     expect(mockWriteFile).toHaveBeenCalledTimes(1);
 
     // UPDATE to done
     expect(mockQuery).toHaveBeenNthCalledWith(
-      3,
+      4,
       expect.stringContaining("status = 'done'"),
       [expect.stringContaining('report-2026-04-01-2026-04-14-'), REPORT_ID]
     );
@@ -79,6 +104,7 @@ describe('generateRevenueReport', () => {
   it('works without createdBy (null)', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -95,7 +121,7 @@ describe('generateRevenueReport', () => {
     const boom = new Error('db exploded');
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })   // INSERT
-      .mockRejectedValueOnce(boom)                             // SELECT orders fails
+      .mockRejectedValueOnce(boom)                             // SELECT summary fails
       .mockResolvedValueOnce({ rows: [] });                     // UPDATE failed
 
     await expect(generateRevenueReport(periodStart, periodEnd, 'user-1')).rejects.toThrow('db exploded');
@@ -107,7 +133,7 @@ describe('generateRevenueReport', () => {
     );
   });
 
-  it('includes totals row in the sheet data', async () => {
+  it('includes totals row in the summary sheet data', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
       .mockResolvedValueOnce({
@@ -115,26 +141,93 @@ describe('generateRevenueReport', () => {
           { status: 'done', order_count: '5', total_revenue: '2500000' },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
     await generateRevenueReport(periodStart, periodEnd);
 
-    const aoaToSheet = XLSX.utils.aoa_to_sheet as jest.Mock;
-    expect(aoaToSheet).toHaveBeenCalledTimes(1);
-    const sheetData: (string | number)[][] = aoaToSheet.mock.calls[0][0];
+    // First call to aoa_to_sheet is summary sheet
+    const summaryData: (string | number)[][] = mockAoaToSheet.mock.calls[0][0];
 
     // Row 0: period header
-    expect(sheetData[0][0]).toMatch(/Kỳ báo cáo/);
+    expect(summaryData[0][0]).toMatch(/Kỳ báo cáo/);
     // Row 1: blank
-    expect(sheetData[1]).toEqual([]);
+    expect(summaryData[1]).toEqual([]);
     // Row 2: column headers
-    expect(sheetData[2]).toEqual(['Trạng thái', 'Số đơn', 'Doanh thu (VNĐ)']);
+    expect(summaryData[2]).toEqual(['Trạng thái', 'Số đơn', 'Doanh thu (VNĐ)']);
     // Row 3: data
-    expect(sheetData[3]).toEqual(['done', 5, 2500000]);
+    expect(summaryData[3]).toEqual(['done', 5, 2500000]);
     // Last row: totals
-    const lastRow = sheetData[sheetData.length - 1];
+    const lastRow = summaryData[summaryData.length - 1];
     expect(lastRow[0]).toBe('Tổng cộng');
     expect(lastRow[1]).toBe(5);
     expect(lastRow[2]).toBe(2500000);
+  });
+
+  it('creates a second sheet "Chi tiết đơn hàng" with correct headers', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+      .mockResolvedValueOnce({ rows: [] })                     // summary: no rows
+      .mockResolvedValueOnce({ rows: [detailRow] })             // detail: one row
+      .mockResolvedValueOnce({ rows: [] });
+
+    await generateRevenueReport(periodStart, periodEnd);
+
+    // aoa_to_sheet called twice (summary + detail)
+    expect(mockAoaToSheet).toHaveBeenCalledTimes(2);
+
+    // Second call is the detail sheet
+    const detailData: (string | number | null)[][] = mockAoaToSheet.mock.calls[1][0];
+
+    // Header row
+    expect(detailData[0]).toEqual([
+      'Mã đơn', 'Trạng thái', 'Ghi chú', 'Ngày tạo', 'Khách hàng',
+      'Loại khách', 'Số điện thoại', 'Thiết bị', 'Báo giá',
+    ]);
+
+    // Data row — customer_type 'individual' → 'Cá nhân'
+    const dataRow = detailData[1];
+    expect(dataRow[0]).toBe('ORD-001');
+    expect(dataRow[1]).toBe('completed');
+    expect(dataRow[2]).toBe('Fast repair');
+    expect(typeof dataRow[3]).toBe('string'); // formatted date string
+    expect(dataRow[4]).toBe('Nguyen Van A');
+    expect(dataRow[5]).toBe('Cá nhân');
+    expect(dataRow[6]).toBe('0901234567');
+    expect(dataRow[7]).toBe('iPhone 14');
+    expect(dataRow[8]).toBe(500000);
+  });
+
+  it('maps customer_type partner → "Đối tác" and unknown → as-is', async () => {
+    const partnerRow = { ...detailRow, customer_type: 'partner', order_code: 'ORD-002' };
+    const unknownRow = { ...detailRow, customer_type: 'corporate', order_code: 'ORD-003' };
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [partnerRow, unknownRow] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await generateRevenueReport(periodStart, periodEnd);
+
+    const detailData: (string | number | null)[][] = mockAoaToSheet.mock.calls[1][0];
+    expect(detailData[1][5]).toBe('Đối tác');
+    expect(detailData[2][5]).toBe('corporate');
+  });
+
+  it('appends two sheets to the workbook', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await generateRevenueReport(periodStart, periodEnd);
+
+    expect(mockBookAppendSheet).toHaveBeenCalledTimes(2);
+    // First sheet name
+    expect(mockBookAppendSheet.mock.calls[0][2]).toBe('Báo cáo doanh thu');
+    // Second sheet name
+    expect(mockBookAppendSheet.mock.calls[1][2]).toBe('Chi tiết đơn hàng');
   });
 });
