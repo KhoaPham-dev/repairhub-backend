@@ -37,13 +37,19 @@ export async function generateRevenueReport(
     const startStr = formatDate(periodStart);
     const endStr = formatDate(periodEnd);
 
+    // Treat periodEnd as inclusive: shift the SQL upper bound to the next day so
+    // that orders created anywhere on periodEnd are included.
+    const queryEnd = new Date(periodEnd);
+    queryEnd.setDate(queryEnd.getDate() + 1);
+    const queryEndStr = formatDate(queryEnd);
+
     // 2. Query summary (grouped by status)
     const summaryResult = await pool.query(
       `SELECT status, COUNT(*) as order_count, COALESCE(SUM(quotation), 0) as total_revenue
        FROM orders
        WHERE created_at >= $1 AND created_at < $2
        GROUP BY status`,
-      [startStr, endStr]
+      [startStr, queryEndStr]
     );
 
     // 3. Query detail (all orders with customer info)
@@ -62,7 +68,7 @@ export async function generateRevenueReport(
        LEFT JOIN customers c ON o.customer_id = c.id
        WHERE o.created_at >= $1 AND o.created_at < $2
        ORDER BY o.created_at ASC`,
-      [startStr, endStr]
+      [startStr, queryEndStr]
     );
 
     // 4. Build Excel workbook
