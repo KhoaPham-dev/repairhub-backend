@@ -56,7 +56,7 @@ export async function generateRevenueReport(
          c.type AS customer_type,
          o.device_name,
          o.quotation,
-         c.full_name AS customer_name,
+         c.name AS customer_name,
          c.phone
        FROM orders o
        LEFT JOIN customers c ON o.customer_id = c.id

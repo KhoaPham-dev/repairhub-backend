@@ -100,14 +100,14 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
 
   // Check partner existence
   const partnerResult = await pool.query(
-    `SELECT id, full_name FROM customers WHERE id = $1 AND UPPER(type) = 'PARTNER'`,
+    `SELECT id, name FROM customers WHERE id = $1 AND UPPER(type) = 'PARTNER'`,
     [partner_id]
   );
   if (partnerResult.rows.length === 0) {
     res.status(404).json({ success: false, data: null, error: 'Đối tác không tồn tại' });
     return;
   }
-  const partner = partnerResult.rows[0] as { id: string; full_name: string };
+  const partner = partnerResult.rows[0] as { id: string; name: string };
 
   // Query orders using normalized date strings
   const ordersResult = await pool.query(
@@ -130,7 +130,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
   const wb = XLSX.utils.book_new();
 
   const headerRows: (string | number | null)[][] = [
-    [`Đối tác: ${partner.full_name} | Kỳ: ${start} – ${end}`],
+    [`Đối tác: ${partner.name} | Kỳ: ${start} – ${end}`],
     [],
     ['Mã đơn', 'Trạng thái', 'Ghi chú', 'Ngày tạo', 'Thiết bị', 'Báo giá'],
   ];
@@ -154,7 +154,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
 
   // Sanitize partner name for use in Content-Disposition filename header
   // Strip non-ASCII to keep Content-Disposition header safe across all locales
-  const safeName = (partner.full_name as string)
+  const safeName = (partner.name as string)
     .replace(/[^\x20-\x7E]/g, '')
     .replace(/["\\]/g, '')
     .replace(/\s+/g, '-')
