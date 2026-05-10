@@ -2,9 +2,13 @@ jest.mock('../../config/database', () => ({
   pool: { query: jest.fn() },
 }));
 
-jest.mock('../../services/revenueReport', () => ({
-  generateRevenueReport: jest.fn(),
-}));
+jest.mock('../../services/revenueReport', () => {
+  const path = require('path');
+  return {
+    generateRevenueReport: jest.fn(),
+    REPORTS_DIR: path.join(process.cwd(), 'backups', 'reports'),
+  };
+});
 
 jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
@@ -252,7 +256,8 @@ describe('GET /api/reports/:id/download', () => {
   });
 
   it('streams file with correct headers when file exists', async () => {
-    const filePath = '/app/backups/reports/report-2026-04-01-2026-04-14-1234567890.xlsx';
+    const path = require('path');
+    const filePath = path.join(process.cwd(), 'backups', 'reports', 'report-2026-04-01-2026-04-14-1234567890.xlsx');
     mockQuery.mockResolvedValueOnce({ rows: [{ file_path: filePath }] });
     mockExistsSync.mockReturnValueOnce(true);
 

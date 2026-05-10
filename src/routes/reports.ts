@@ -4,13 +4,12 @@ import fs from 'fs';
 import { pool } from '../config/database';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
-import { generateRevenueReport } from '../services/revenueReport';
+import { generateRevenueReport, REPORTS_DIR } from '../services/revenueReport';
 
 const router = Router();
 router.use(authenticate, requireAdmin);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const REPORTS_DIR = path.resolve('/app/backups/reports');
 
 // GET / — list all reports ordered by generated_at DESC
 router.get('/', asyncHandler(async (_req: Request, res: Response) => {

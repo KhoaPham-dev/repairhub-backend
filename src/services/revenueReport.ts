@@ -3,7 +3,7 @@ import fs from 'fs';
 import * as XLSX from 'xlsx';
 import { pool } from '../config/database';
 
-const REPORTS_DIR = path.join(process.cwd(), 'backups', 'reports');
+export const REPORTS_DIR = path.join(process.cwd(), 'backups', 'reports');
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
