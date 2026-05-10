@@ -100,7 +100,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
 
   // Check partner existence
   const partnerResult = await pool.query(
-    `SELECT id, full_name FROM customers WHERE id = $1 AND customer_type = 'partner'`,
+    `SELECT id, full_name FROM customers WHERE id = $1 AND type = 'partner'`,
     [partner_id]
   );
   if (partnerResult.rows.length === 0) {
@@ -120,7 +120,6 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
        o.quotation
      FROM orders o
      WHERE o.customer_id = $1
-       AND o.customer_type = 'partner'
        AND o.created_at >= $2
        AND o.created_at < $3
      ORDER BY o.created_at ASC`,
