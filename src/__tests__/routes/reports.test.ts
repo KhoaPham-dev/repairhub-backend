@@ -6,6 +6,7 @@ jest.mock('../../services/revenueReport', () => {
   const path = require('path');
   return {
     generateRevenueReport: jest.fn(),
+    todayVN: jest.fn(() => new Date('2026-05-11T00:00:00Z')),
     REPORTS_DIR: path.join(process.cwd(), 'backups', 'reports'),
   };
 });
@@ -30,11 +31,12 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import { pool } from '../../config/database';
 import reportsRouter from '../../routes/reports';
-import { generateRevenueReport } from '../../services/revenueReport';
+import { generateRevenueReport, todayVN } from '../../services/revenueReport';
 import { errorHandler } from '../../middleware/errorHandler';
 
 const mockQuery = pool.query as jest.Mock;
 const mockGenerate = generateRevenueReport as jest.Mock;
+const mockTodayVN = todayVN as jest.Mock;
 const mockExistsSync = fs.existsSync as jest.Mock;
 const mockCreateReadStream = fs.createReadStream as jest.Mock;
 
@@ -54,6 +56,12 @@ function buildApp() {
 }
 
 afterEach(() => jest.resetAllMocks());
+
+// Restore todayVN default implementation after each resetAllMocks so the route
+// always has a callable function even when the test doesn't set it explicitly.
+beforeEach(() => {
+  mockTodayVN.mockImplementation(() => new Date('2026-05-11T00:00:00Z'));
+});
 
 const VALID_PARTNER_UUID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
 
@@ -378,7 +386,7 @@ describe('GET /api/reports/partner', () => {
   it('returns 200 with xlsx buffer when valid request and orders exist', async () => {
     // First query: partner lookup
     mockQuery.mockResolvedValueOnce({
-      rows: [{ id: VALID_PARTNER_UUID, full_name: 'Cong Ty ABC' }],
+      rows: [{ id: VALID_PARTNER_UUID, name: 'Cong Ty ABC' }],
     });
     // Second query: orders
     mockQuery.mockResolvedValueOnce({
@@ -409,7 +417,7 @@ describe('GET /api/reports/partner', () => {
   it('returns 200 with xlsx (headers only) when no orders found', async () => {
     // First query: partner lookup
     mockQuery.mockResolvedValueOnce({
-      rows: [{ id: VALID_PARTNER_UUID, full_name: 'Partner Empty' }],
+      rows: [{ id: VALID_PARTNER_UUID, name: 'Partner Empty' }],
     });
     // Second query: no orders
     mockQuery.mockResolvedValueOnce({ rows: [] });

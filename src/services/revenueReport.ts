@@ -5,6 +5,12 @@ import { pool } from '../config/database';
 
 export const REPORTS_DIR = path.join(process.cwd(), 'backups', 'reports');
 
+/** Returns today's date string (YYYY-MM-DD) in Asia/Ho_Chi_Minh timezone. */
+export function todayVN(): Date {
+  const vnDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
+  return new Date(vnDateStr + 'T00:00:00Z');
+}
+
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }

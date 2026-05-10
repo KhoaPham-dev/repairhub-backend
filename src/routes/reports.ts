@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import { pool } from '../config/database';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
-import { generateRevenueReport, REPORTS_DIR } from '../services/revenueReport';
+import { generateRevenueReport, todayVN, REPORTS_DIR } from '../services/revenueReport';
 
 const router = Router();
 router.use(authenticate, requireAdmin);
@@ -42,8 +42,8 @@ router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
       return;
     }
   } else {
-    // Default: last 14 days
-    periodEnd = new Date();
+    // Default: last 14 days (using VN local date to avoid UTC date mismatch before 07:00 VN time)
+    periodEnd = todayVN();
     periodStart = new Date(periodEnd);
     periodStart.setDate(periodStart.getDate() - 13);
   }

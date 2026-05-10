@@ -17,7 +17,7 @@ jest.mock('fs', () => ({
 }));
 
 import { pool } from '../../config/database';
-import { generateRevenueReport } from '../../services/revenueReport';
+import { generateRevenueReport, todayVN } from '../../services/revenueReport';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
 
@@ -52,6 +52,19 @@ beforeEach(() => {
   mockWriteFile.mockImplementation(() => undefined);
   // aoa_to_sheet returns a unique object each call so book_append_sheet gets distinct sheets
   mockAoaToSheet.mockImplementation(() => ({}));
+});
+
+describe('todayVN', () => {
+  it('returns a Date whose ISO date string matches the current VN local date', () => {
+    const result = todayVN();
+    const expected = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
+    expect(result.toISOString().slice(0, 10)).toBe(expected);
+  });
+
+  it('returns a Date with time set to midnight UTC (T00:00:00Z)', () => {
+    const result = todayVN();
+    expect(result.toISOString()).toMatch(/T00:00:00\.000Z$/);
+  });
 });
 
 describe('generateRevenueReport', () => {
