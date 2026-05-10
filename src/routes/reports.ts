@@ -9,6 +9,9 @@ import { generateRevenueReport } from '../services/revenueReport';
 const router = Router();
 router.use(authenticate, requireAdmin);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const REPORTS_DIR = path.resolve('/app/backups/reports');
+
 // GET / — list all reports ordered by generated_at DESC
 router.get('/', asyncHandler(async (_req: Request, res: Response) => {
   const result = await pool.query(
@@ -29,6 +32,15 @@ router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
   if (period_start && period_end) {
     periodStart = new Date(period_start);
     periodEnd = new Date(period_end);
+
+    if (isNaN(periodStart.getTime()) || isNaN(periodEnd.getTime())) {
+      res.status(400).json({ success: false, data: null, error: 'Ngày không hợp lệ' });
+      return;
+    }
+    if (periodEnd <= periodStart) {
+      res.status(400).json({ success: false, data: null, error: 'Ngày kết thúc phải sau ngày bắt đầu' });
+      return;
+    }
   } else {
     // Default: last 14 days
     periodEnd = new Date();
@@ -51,6 +63,12 @@ router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
 // GET /:id/download — stream the Excel file
 router.get('/:id/download', asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  if (!UUID_RE.test(id)) {
+    res.status(404).json({ success: false, data: null, error: 'Báo cáo không tồn tại' });
+    return;
+  }
+
   const result = await pool.query(
     `SELECT file_path FROM revenue_reports WHERE id = $1`,
     [id]
@@ -67,10 +85,17 @@ router.get('/:id/download', asyncHandler(async (req: Request, res: Response) => 
     return;
   }
 
-  const filename = path.basename(filePath);
+  // Path traversal guard — ensure file resolves inside the reports directory
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(REPORTS_DIR + path.sep)) {
+    res.status(403).json({ success: false, data: null, error: 'Forbidden' });
+    return;
+  }
+
+  const filename = path.basename(resolved);
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  fs.createReadStream(filePath).pipe(res);
+  fs.createReadStream(resolved).pipe(res);
 }));
 
 export default router;

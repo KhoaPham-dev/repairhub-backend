@@ -30,6 +30,9 @@ const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
 const techToken  = jwt.sign({ id: 'u2', username: 'tech',  role: 'TECHNICIAN', branch_id: null }, SECRET, { expiresIn: '1h' });
 
+// A valid UUID for use in download tests
+const VALID_UUID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+
 function buildApp() {
   const app = express();
   app.use(express.json());
@@ -99,7 +102,7 @@ describe('POST /api/reports/generate', () => {
     const REPORT_ID = 'rr-111';
     mockGenerate.mockResolvedValueOnce(REPORT_ID);
     mockQuery.mockResolvedValueOnce({
-      rows: [{ id: REPORT_ID, period_start: '2026-04-01', period_end: '2026-04-14', generated_at: '2026-04-15T00:00:00Z', status: 'done', error: null, file_path: '/app/backups/reports/report-2026-04-01-2026-04-14.xlsx' }],
+      rows: [{ id: REPORT_ID, period_start: '2026-04-01', period_end: '2026-04-14', generated_at: '2026-04-15T00:00:00Z', status: 'done', error: null, file_path: '/app/backups/reports/report-2026-04-01-2026-04-14-1234567890.xlsx' }],
     });
 
     const res = await request(buildApp())
@@ -138,6 +141,54 @@ describe('POST /api/reports/generate', () => {
     expect(diffDays).toBe(13);
   });
 
+  it('returns 400 when period_start is invalid', async () => {
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period_start: 'not-a-date', period_end: '2026-04-14' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Ngày không hợp lệ');
+    expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when period_end is invalid', async () => {
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period_start: '2026-04-01', period_end: 'bad-date' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Ngày không hợp lệ');
+    expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when period_end is before period_start', async () => {
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period_start: '2026-04-14', period_end: '2026-04-01' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Ngày kết thúc phải sau ngày bắt đầu');
+    expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when period_end equals period_start', async () => {
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period_start: '2026-04-01', period_end: '2026-04-01' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Ngày kết thúc phải sau ngày bắt đầu');
+    expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
   it('returns 500 when generation fails', async () => {
     mockGenerate.mockRejectedValueOnce(new Error('disk full'));
     const res = await request(buildApp())
@@ -152,10 +203,18 @@ describe('POST /api/reports/generate', () => {
 // GET /:id/download
 // ────────────────────────────────────────────────
 describe('GET /api/reports/:id/download', () => {
+  it('returns 404 when id is not a valid UUID', async () => {
+    const res = await request(buildApp())
+      .get('/api/reports/not-a-uuid/download')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(404);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
   it('returns 404 when report id not found in DB', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp())
-      .get('/api/reports/nonexistent-id/download')
+      .get(`/api/reports/${VALID_UUID}/download`)
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(404);
   });
@@ -163,22 +222,37 @@ describe('GET /api/reports/:id/download', () => {
   it('returns 404 when file_path is null', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ file_path: null }] });
     const res = await request(buildApp())
-      .get('/api/reports/some-id/download')
+      .get(`/api/reports/${VALID_UUID}/download`)
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(404);
   });
 
   it('returns 404 when file does not exist on disk', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ file_path: '/app/backups/reports/report-x.xlsx' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ file_path: '/app/backups/reports/report-x-1234567890.xlsx' }] });
     mockExistsSync.mockReturnValueOnce(false);
     const res = await request(buildApp())
-      .get('/api/reports/some-id/download')
+      .get(`/api/reports/${VALID_UUID}/download`)
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(404);
   });
 
+  it('returns 403 when file_path resolves outside reports directory (path traversal)', async () => {
+    // A path that uses traversal to escape the reports directory
+    const maliciousPath = '/app/backups/reports/../../../etc/passwd';
+    mockQuery.mockResolvedValueOnce({ rows: [{ file_path: maliciousPath }] });
+    mockExistsSync.mockReturnValueOnce(true);
+
+    const res = await request(buildApp())
+      .get(`/api/reports/${VALID_UUID}/download`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Forbidden');
+    expect(mockCreateReadStream).not.toHaveBeenCalled();
+  });
+
   it('streams file with correct headers when file exists', async () => {
-    const filePath = '/app/backups/reports/report-2026-04-01-2026-04-14.xlsx';
+    const filePath = '/app/backups/reports/report-2026-04-01-2026-04-14-1234567890.xlsx';
     mockQuery.mockResolvedValueOnce({ rows: [{ file_path: filePath }] });
     mockExistsSync.mockReturnValueOnce(true);
 
@@ -188,12 +262,12 @@ describe('GET /api/reports/:id/download', () => {
     mockCreateReadStream.mockReturnValueOnce(fakeStream);
 
     const res = await request(buildApp())
-      .get('/api/reports/some-id/download')
+      .get(`/api/reports/${VALID_UUID}/download`)
       .set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
     expect(res.headers['content-disposition']).toContain('attachment');
-    expect(res.headers['content-disposition']).toContain('report-2026-04-01-2026-04-14.xlsx');
+    expect(res.headers['content-disposition']).toContain('report-2026-04-01-2026-04-14-1234567890.xlsx');
     expect(res.headers['content-type']).toContain('spreadsheetml');
   });
 });

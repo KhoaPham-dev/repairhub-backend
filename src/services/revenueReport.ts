@@ -63,7 +63,7 @@ export async function generateRevenueReport(
 
     // 4. Write file
     fs.mkdirSync(REPORTS_DIR, { recursive: true });
-    const filePath = path.join(REPORTS_DIR, `report-${startStr}-${endStr}.xlsx`);
+    const filePath = path.join(REPORTS_DIR, `report-${startStr}-${endStr}-${Date.now()}.xlsx`);
     XLSX.writeFile(wb, filePath);
 
     // 5. Update row to done

@@ -72,7 +72,7 @@ describe('generateRevenueReport', () => {
     expect(mockQuery).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining("status = 'done'"),
-      [expect.stringContaining('report-2026-04-01-2026-04-14.xlsx'), REPORT_ID]
+      [expect.stringContaining('report-2026-04-01-2026-04-14-'), REPORT_ID]
     );
   });
 
