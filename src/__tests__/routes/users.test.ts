@@ -109,6 +109,14 @@ describe('PUT /api/users/:id', () => {
 describe('POST /api/users/:id/reset-password', () => {
   const validId = '33333333-3333-3333-3333-333333333333';
 
+  it('returns 404 for invalid UUID format', async () => {
+    const res = await request(buildApp())
+      .post('/api/users/not-a-uuid/reset-password')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ password: 'newpassword' });
+    expect(res.status).toBe(404);
+  });
+
   it('returns 400 when password is empty', async () => {
     const res = await request(buildApp())
       .post(`/api/users/${validId}/reset-password`)
@@ -117,8 +125,17 @@ describe('POST /api/users/:id/reset-password', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns 404 when user does not exist', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // UPDATE finds no row
+    const res = await request(buildApp())
+      .post(`/api/users/${validId}/reset-password`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ password: 'newpassword' });
+    expect(res.status).toBe(404);
+  });
+
   it('resets password and returns success', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: validId }], rowCount: 1 }); // UPDATE
     const res = await request(buildApp())
       .post(`/api/users/${validId}/reset-password`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -144,6 +161,14 @@ describe('PATCH /api/users/:id/password', () => {
   const techId = 'u2';
   const techSelfToken = jwt.sign({ id: techId, username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
 
+  it('returns 404 for invalid UUID format', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/not-a-uuid/password')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(404);
+  });
+
   it('returns 400 when newPassword is missing', async () => {
     const res = await request(buildApp())
       .patch(`/api/users/${targetId}/password`)
@@ -163,7 +188,7 @@ describe('PATCH /api/users/:id/password', () => {
   });
 
   it('admin can change any user password — returns 204', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: targetId }], rowCount: 1 }); // UPDATE
     const res = await request(buildApp())
       .patch(`/api/users/${targetId}/password`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -171,11 +196,22 @@ describe('PATCH /api/users/:id/password', () => {
     expect(res.status).toBe(204);
   });
 
-  it('technician can change own password — returns 204', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+  it('returns 404 when user does not exist', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // UPDATE finds no row
     const res = await request(buildApp())
-      .patch(`/api/users/${techId}/password`)
-      .set('Authorization', `Bearer ${techSelfToken}`)
+      .patch(`/api/users/${targetId}/password`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(404);
+  });
+
+  it('technician can change own password — returns 204', async () => {
+    const techValidId = '22222222-2222-2222-2222-222222222222';
+    const techValidToken = jwt.sign({ id: techValidId, username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: techValidId }], rowCount: 1 }); // UPDATE
+    const res = await request(buildApp())
+      .patch(`/api/users/${techValidId}/password`)
+      .set('Authorization', `Bearer ${techValidToken}`)
       .send({ newPassword: 'mypassword1' });
     expect(res.status).toBe(204);
   });

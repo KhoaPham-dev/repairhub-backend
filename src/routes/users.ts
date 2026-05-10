@@ -64,11 +64,16 @@ router.put('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response
 }));
 
 router.post('/:id/reset-password', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+  if (!UUID_RE.test(req.params.id)) {
+    res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' });
+    return;
+  }
   const { password } = req.body as { password: string };
   if (!password) { res.status(400).json({ success: false, data: null, error: 'Mật khẩu không được để trống' }); return; }
 
   const hash = await bcrypt.hash(password, 10);
-  await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
+  const result = await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id', [hash, req.params.id]);
+  if (result.rowCount === 0) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' }); return; }
   await logActivity(req.user!.id, 'RESET_PASSWORD', 'user', req.params.id);
   res.json({ success: true, data: null, error: null });
 }));
@@ -77,6 +82,11 @@ router.post('/:id/reset-password', requireAdmin, asyncHandler(async (req: Reques
 // Admin: can change any user's password.
 // Technician: can only change own password.
 router.patch('/:id/password', asyncHandler(async (req: Request, res: Response) => {
+  if (!UUID_RE.test(req.params.id)) {
+    res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' });
+    return;
+  }
+
   const { newPassword } = req.body as { newPassword?: string };
 
   if (!newPassword || newPassword.length < 8) {
@@ -93,7 +103,8 @@ router.patch('/:id/password', asyncHandler(async (req: Request, res: Response) =
   }
 
   const hash = await bcrypt.hash(newPassword, 10);
-  await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
+  const result = await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id', [hash, req.params.id]);
+  if (result.rowCount === 0) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy người dùng' }); return; }
   await logActivity(req.user!.id, 'CHANGE_PASSWORD', 'user', req.params.id);
   res.status(204).send();
 }));
