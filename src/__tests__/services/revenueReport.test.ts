@@ -30,12 +30,14 @@ const mockAoaToSheet = XLSX.utils.aoa_to_sheet as jest.Mock;
 const REPORT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const periodStart = new Date('2026-04-01');
 const periodEnd = new Date('2026-04-14');
+// SQL upper bound is periodEnd + 1 day (inclusive boundary fix)
+const queryEndStr = '2026-04-15';
 
 // Reusable detail row fixture
 const detailRow = {
   order_code: 'ORD-001',
   status: 'completed',
-  notes: 'Fast repair',
+  fault_description: 'Fast repair',
   created_at: new Date('2026-04-05T10:00:00Z'),
   customer_type: 'individual',
   device_name: 'iPhone 14',
@@ -69,31 +71,31 @@ describe('generateRevenueReport', () => {
 
     expect(id).toBe(REPORT_ID);
 
-    // INSERT called with pending
+    // INSERT stores the original periodEnd (not shifted)
     expect(mockQuery).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('INSERT INTO revenue_reports'),
       ['2026-04-01', '2026-04-14', 'user-1']
     );
 
-    // SELECT summary
+    // SELECT summary uses queryEndStr (periodEnd + 1 day) for inclusive upper bound
     expect(mockQuery).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('FROM orders'),
-      ['2026-04-01', '2026-04-14']
+      ['2026-04-01', queryEndStr]
     );
 
-    // SELECT detail (joins customers)
+    // SELECT detail uses queryEndStr (periodEnd + 1 day) for inclusive upper bound
     expect(mockQuery).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining('LEFT JOIN customers'),
-      ['2026-04-01', '2026-04-14']
+      ['2026-04-01', queryEndStr]
     );
 
     // XLSX.writeFile called once
     expect(mockWriteFile).toHaveBeenCalledTimes(1);
 
-    // UPDATE to done
+    // UPDATE to done uses original endStr in filename
     expect(mockQuery).toHaveBeenNthCalledWith(
       4,
       expect.stringContaining("status = 'done'"),
@@ -229,5 +231,79 @@ describe('generateRevenueReport', () => {
     expect(mockBookAppendSheet.mock.calls[0][2]).toBe('Báo cáo doanh thu');
     // Second sheet name
     expect(mockBookAppendSheet.mock.calls[1][2]).toBe('Chi tiết đơn hàng');
+  });
+
+  describe('inclusive period_end boundary', () => {
+    it('uses periodEnd + 1 day as SQL upper bound when periodEnd is today', async () => {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStr = today.toISOString().slice(0, 10);
+
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await generateRevenueReport(new Date(today), new Date(today), 'user-1');
+
+      // INSERT stores the original date (todayStr), not the shifted one
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('INSERT INTO revenue_reports'),
+        [todayStr, todayStr, 'user-1']
+      );
+
+      // Summary query upper bound is tomorrow (inclusive)
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('FROM orders'),
+        [todayStr, tomorrowStr]
+      );
+
+      // Detail query upper bound is tomorrow (inclusive)
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        3,
+        expect.stringContaining('LEFT JOIN customers'),
+        [todayStr, tomorrowStr]
+      );
+    });
+
+    it('uses periodEnd + 1 day as SQL upper bound when periodEnd is a past date', async () => {
+      const pastEnd = new Date('2025-12-31');
+      const pastStart = new Date('2025-12-01');
+
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await generateRevenueReport(pastStart, pastEnd, 'user-1');
+
+      // INSERT stores original end date
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('INSERT INTO revenue_reports'),
+        ['2025-12-01', '2025-12-31', 'user-1']
+      );
+
+      // SQL queries use 2026-01-01 (the day after 2025-12-31)
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('FROM orders'),
+        ['2025-12-01', '2026-01-01']
+      );
+
+      expect(mockQuery).toHaveBeenNthCalledWith(
+        3,
+        expect.stringContaining('LEFT JOIN customers'),
+        ['2025-12-01', '2026-01-01']
+      );
+    });
   });
 });
