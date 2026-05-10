@@ -51,9 +51,9 @@ export async function generateRevenueReport(
       `SELECT
          o.order_code,
          o.status,
-         o.notes,
+         o.fault_description,
          o.created_at,
-         o.customer_type,
+         c.type AS customer_type,
          o.device_name,
          o.quotation,
          c.full_name AS customer_name,
@@ -100,7 +100,7 @@ export async function generateRevenueReport(
       detailRows.push([
         row.order_code,
         row.status,
-        row.notes ?? '',
+        row.fault_description ?? '',
         formatDateVN(row.created_at),
         row.customer_name ?? '',
         displayCustomerType(row.customer_type),

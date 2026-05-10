@@ -114,7 +114,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
     `SELECT
        o.order_code,
        o.status,
-       o.notes,
+       o.fault_description,
        o.created_at,
        o.device_name,
        o.quotation
@@ -140,7 +140,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
     return [
       row.order_code,
       row.status,
-      row.notes ?? '',
+      row.fault_description ?? '',
       createdAt,
       row.device_name ?? '',
       row.quotation !== null ? parseFloat(row.quotation) : 0,
