@@ -153,10 +153,12 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 
   // Sanitize partner name for use in Content-Disposition filename header
+  // Strip non-ASCII to keep Content-Disposition header safe across all locales
   const safeName = (partner.full_name as string)
-    .replace(/[^\wÀ-ɏ\s-]/g, '')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/["\\]/g, '')
     .replace(/\s+/g, '-')
-    .slice(0, 80);
+    .slice(0, 80) || 'partner';
   const filename = `partner-report-${safeName}-${startNorm}-${endNorm}.xlsx`;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
