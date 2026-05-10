@@ -26,7 +26,8 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
   }
 
   try {
-    const secret = process.env.JWT_SECRET || 'change-me';
+    const secret = process.env.JWT_SECRET ?? (process.env.NODE_ENV === 'test' ? 'test-secret' : null);
+    if (!secret) throw new Error('JWT_SECRET is required');
     const payload = jwt.verify(token, secret) as AuthUser;
     req.user = payload;
     next();

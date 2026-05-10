@@ -483,13 +483,15 @@ describe('POST /api/orders/:id/images', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 403 when technician does not own the order', async () => {
+  it('technician can upload to any order (RH-76: ownership check removed)', async () => {
     const techToken = jwt.sign({ id: 'u-tech', username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
     mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u-other' }] }); // order owned by someone else
     const res = await request(buildApp())
       .post('/api/orders/o1/images')
       .set('Authorization', `Bearer ${techToken}`);
-    expect(res.status).toBe(403);
+    // Passes the auth check — multer mock provides no files → 400 (not 403)
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/ảnh/);
   });
 
   it('returns 400 when no files uploaded (admin can upload to any order)', async () => {
