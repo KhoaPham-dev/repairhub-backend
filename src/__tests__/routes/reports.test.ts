@@ -16,6 +16,14 @@ jest.mock('fs', () => ({
   createReadStream: jest.fn(),
 }));
 
+jest.mock('xlsx', () => {
+  const actual = jest.requireActual('xlsx');
+  return {
+    ...actual,
+    write: jest.fn((_wb: unknown, _opts: unknown) => Buffer.from('fake-xlsx-content')),
+  };
+});
+
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -46,6 +54,8 @@ function buildApp() {
 }
 
 afterEach(() => jest.resetAllMocks());
+
+const VALID_PARTNER_UUID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
 
 // ────────────────────────────────────────────────
 // Auth guard tests (shared across all endpoints)
@@ -274,5 +284,142 @@ describe('GET /api/reports/:id/download', () => {
     expect(res.headers['content-disposition']).toContain('attachment');
     expect(res.headers['content-disposition']).toContain('report-2026-04-01-2026-04-14-1234567890.xlsx');
     expect(res.headers['content-type']).toContain('spreadsheetml');
+  });
+});
+
+// ────────────────────────────────────────────────
+// GET /partner
+// ────────────────────────────────────────────────
+describe('GET /api/reports/partner', () => {
+  const baseQuery = `/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&start=2026-04-01&end=2026-04-30`;
+
+  it('returns 400 when partner_id is missing', async () => {
+    const res = await request(buildApp())
+      .get('/api/reports/partner?start=2026-04-01&end=2026-04-30')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when start is missing', async () => {
+    const res = await request(buildApp())
+      .get(`/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&end=2026-04-30`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when end is missing', async () => {
+    const res = await request(buildApp())
+      .get(`/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&start=2026-04-01`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when partner_id is not a valid UUID', async () => {
+    const res = await request(buildApp())
+      .get('/api/reports/partner?partner_id=not-a-uuid&start=2026-04-01&end=2026-04-30')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when start date is invalid', async () => {
+    const res = await request(buildApp())
+      .get(`/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&start=not-a-date&end=2026-04-30`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when end date is invalid', async () => {
+    const res = await request(buildApp())
+      .get(`/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&start=2026-04-01&end=bad-date`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when end is before start', async () => {
+    const res = await request(buildApp())
+      .get(`/api/reports/partner?partner_id=${VALID_PARTNER_UUID}&start=2026-04-30&end=2026-04-01`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when partner does not exist', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get(baseQuery)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('returns 404 when customer exists but is not a partner', async () => {
+    // The query filters by customer_type = 'partner' so returns empty rows
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get(baseQuery)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('returns 200 with xlsx buffer when valid request and orders exist', async () => {
+    // First query: partner lookup
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: VALID_PARTNER_UUID, full_name: 'Cong Ty ABC' }],
+    });
+    // Second query: orders
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          order_code: 'ORD-001',
+          status: 'done',
+          notes: 'Some note',
+          created_at: '2026-04-15T10:00:00.000Z',
+          device_name: 'iPhone 14',
+          quotation: '500000',
+        },
+      ],
+    });
+
+    const res = await request(buildApp())
+      .get(baseQuery)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('spreadsheetml');
+    expect(res.headers['content-disposition']).toContain('attachment');
+    // filename uses normalized start (startNorm) and endNorm (end + 1 day for inclusive range)
+    expect(res.headers['content-disposition']).toContain('partner-report-Cong-Ty-ABC-2026-04-01-2026-05-01.xlsx');
+    expect(res.body).toBeTruthy();
+  });
+
+  it('returns 200 with xlsx (headers only) when no orders found', async () => {
+    // First query: partner lookup
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: VALID_PARTNER_UUID, full_name: 'Partner Empty' }],
+    });
+    // Second query: no orders
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(buildApp())
+      .get(baseQuery)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('spreadsheetml');
+    expect(res.headers['content-disposition']).toContain('attachment');
   });
 });
