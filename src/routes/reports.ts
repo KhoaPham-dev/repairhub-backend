@@ -100,7 +100,7 @@ router.get('/partner', asyncHandler(async (req: Request, res: Response) => {
 
   // Check partner existence
   const partnerResult = await pool.query(
-    `SELECT id, full_name FROM customers WHERE id = $1 AND type = 'partner'`,
+    `SELECT id, full_name FROM customers WHERE id = $1 AND UPPER(type) = 'PARTNER'`,
     [partner_id]
   );
   if (partnerResult.rows.length === 0) {
