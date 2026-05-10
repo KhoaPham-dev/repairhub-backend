@@ -10,7 +10,9 @@ import ordersRouter from './routes/orders';
 import warrantyRouter from './routes/warranty';
 import backupRouter from './routes/backup';
 import dashboardRouter from './routes/dashboard';
+import reportsRouter from './routes/reports';
 import { errorHandler } from './middleware/errorHandler';
+import { startScheduler } from './scheduler';
 
 const app = express();
 
@@ -28,6 +30,11 @@ app.use('/api/orders', ordersRouter);
 app.use('/api/warranty', warrantyRouter);
 app.use('/api/backup', backupRouter);
 app.use('/api/dashboard', dashboardRouter);
+app.use('/api/reports', reportsRouter);
+
+if (process.env.NODE_ENV !== 'test') {
+  startScheduler();
+}
 
 app.use(errorHandler);
 
