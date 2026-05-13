@@ -102,22 +102,23 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
      JOIN branches b ON b.id = o.branch_id
      JOIN users u ON u.id = o.created_by
      ${where}
-     ORDER BY o.created_at ${orderDir}
+     ORDER BY
+       CASE
+         WHEN o.status NOT IN ('DA_GIAO','HUY_TRA_MAY') AND (EXTRACT(EPOCH FROM (NOW() - o.created_at)) / 86400) >= 5 THEN 0
+         WHEN o.status NOT IN ('DA_GIAO','HUY_TRA_MAY') AND (EXTRACT(EPOCH FROM (NOW() - o.created_at)) / 86400) >= 3 THEN 1
+         ELSE 2
+       END ASC,
+       o.created_at ${orderDir}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
 
-  const config = await pool.query("SELECT value FROM system_config WHERE key IN ('priority_low_days','priority_medium_days')");
-  const cfg: Record<string, number> = {};
-  for (const r of config.rows) cfg[r.key] = Number(r.value);
-  const lowDays = cfg['priority_low_days'] ?? 3;
-  const medDays = cfg['priority_medium_days'] ?? 7;
-
   const rows = result.rows.map((order) => {
-    let priority: 'LOW' | 'MEDIUM' | 'HIGH' | null = null;
+    let priority: 'MEDIUM' | 'HIGH' | null = null;
     if (!TERMINAL_STATUSES.includes(order.status)) {
       const ageDays = (Date.now() - new Date(order.created_at).getTime()) / 86400000;
-      priority = ageDays < lowDays ? 'LOW' : ageDays < medDays ? 'MEDIUM' : 'HIGH';
+      if (ageDays >= 5) priority = 'HIGH';
+      else if (ageDays >= 3) priority = 'MEDIUM';
     }
     return { ...order, priority };
   });

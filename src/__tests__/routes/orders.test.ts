@@ -68,19 +68,47 @@ describe('GET /api/orders', () => {
 
   it('returns orders list with priority', async () => {
     const order = { id: 'o1', status: 'TIEP_NHAN', created_at: new Date(Date.now() - 86400000 * 2).toISOString() };
-    mockQuery
-      .mockResolvedValueOnce({ rows: [order] }) // orders query
-      .mockResolvedValueOnce({ rows: [{ key: 'priority_low_days', value: '3' }, { key: 'priority_medium_days', value: '7' }] }); // config
+    mockQuery.mockResolvedValueOnce({ rows: [order] });
     const res = await request(buildApp()).get('/api/orders').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data[0].priority).toBeDefined();
+    expect(res.body.data[0]).toHaveProperty('priority');
+  });
+
+  it('assigns priority=HIGH for orders 5+ days old with non-terminal status', async () => {
+    const order = { id: 'o2', status: 'DANG_SUA_CHUA', created_at: new Date(Date.now() - 86400000 * 6).toISOString() };
+    mockQuery.mockResolvedValueOnce({ rows: [order] });
+    const res = await request(buildApp()).get('/api/orders').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].priority).toBe('HIGH');
+  });
+
+  it('assigns priority=MEDIUM for orders 3–4 days old with non-terminal status', async () => {
+    const order = { id: 'o3', status: 'TIEP_NHAN', created_at: new Date(Date.now() - 86400000 * 4).toISOString() };
+    mockQuery.mockResolvedValueOnce({ rows: [order] });
+    const res = await request(buildApp()).get('/api/orders').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].priority).toBe('MEDIUM');
+  });
+
+  it('assigns priority=null for orders less than 3 days old', async () => {
+    const order = { id: 'o4', status: 'TIEP_NHAN', created_at: new Date(Date.now() - 86400000 * 1).toISOString() };
+    mockQuery.mockResolvedValueOnce({ rows: [order] });
+    const res = await request(buildApp()).get('/api/orders').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].priority).toBeNull();
+  });
+
+  it('assigns priority=null for orders with terminal status regardless of age', async () => {
+    const order = { id: 'o5', status: 'DA_GIAO', created_at: new Date(Date.now() - 86400000 * 10).toISOString() };
+    mockQuery.mockResolvedValueOnce({ rows: [order] });
+    const res = await request(buildApp()).get('/api/orders').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].priority).toBeNull();
   });
 
   it('search clause includes device_name match', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp())
       .get('/api/orders?search=Loa+JBL')
       .set('Authorization', `Bearer ${adminToken}`);
@@ -90,9 +118,7 @@ describe('GET /api/orders', () => {
   });
 
   it('exclude_status pushes a NOT IN clause with each status as a parameter', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp())
       .get('/api/orders?exclude_status=DA_GIAO,HUY_TRA_MAY')
       .set('Authorization', `Bearer ${adminToken}`);
