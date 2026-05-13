@@ -102,13 +102,7 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
      JOIN branches b ON b.id = o.branch_id
      JOIN users u ON u.id = o.created_by
      ${where}
-     ORDER BY
-       CASE
-         WHEN o.status NOT IN ('DA_GIAO','HUY_TRA_MAY') AND (EXTRACT(EPOCH FROM (NOW() - o.created_at)) / 86400) >= 5 THEN 0
-         WHEN o.status NOT IN ('DA_GIAO','HUY_TRA_MAY') AND (EXTRACT(EPOCH FROM (NOW() - o.created_at)) / 86400) >= 3 THEN 1
-         ELSE 2
-       END ASC,
-       o.created_at ${orderDir}
+     ORDER BY o.created_at ${orderDir}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
