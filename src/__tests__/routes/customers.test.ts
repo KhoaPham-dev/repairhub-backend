@@ -17,6 +17,7 @@ const mockQuery = pool.query as jest.Mock;
 const mockLogActivity = logActivity as jest.Mock;
 const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
+const techToken = jwt.sign({ id: 'u2', username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
 
 function buildApp() {
   const app = express();
@@ -106,7 +107,7 @@ describe('GET /api/customers/:id', () => {
 
 describe('PUT /api/customers/:id', () => {
   it('returns 404 when customer not found', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE returns no rows
     const res = await request(buildApp())
       .put('/api/customers/c99')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -114,15 +115,94 @@ describe('PUT /api/customers/:id', () => {
     expect(res.status).toBe(404);
   });
 
-  it('updates customer and returns updated data', async () => {
+  it('updates customer and returns updated data (no phone change)', async () => {
     const updated = { id: 'c1', phone: '0900000000', name: 'Updated' };
-    mockQuery.mockResolvedValueOnce({ rows: [updated] });
+    mockQuery.mockResolvedValueOnce({ rows: [updated] }); // UPDATE
     const res = await request(buildApp())
       .put('/api/customers/c1')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ name: 'Updated' });
     expect(res.status).toBe(200);
     expect(res.body.data.name).toBe('Updated');
+  });
+
+  it('updates customer phone when phone is unique', async () => {
+    const updated = { id: 'c1', phone: '0911111111', name: 'John' };
+    mockQuery.mockResolvedValueOnce({ rows: [] });    // uniqueness check — no duplicate
+    mockQuery.mockResolvedValueOnce({ rows: [updated] }); // UPDATE
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0911111111', name: 'John' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.phone).toBe('0911111111');
+    // verify uniqueness check was called with trimmed phone and correct id
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1 AND id != $2',
+      ['0911111111', 'c1']
+    );
+  });
+
+  it('trims whitespace from phone before uniqueness check', async () => {
+    const updated = { id: 'c1', phone: '0911111111', name: 'John' };
+    mockQuery.mockResolvedValueOnce({ rows: [] });    // uniqueness check — no duplicate
+    mockQuery.mockResolvedValueOnce({ rows: [updated] }); // UPDATE
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '  0911111111  ' });
+    expect(res.status).toBe(200);
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1 AND id != $2',
+      ['0911111111', 'c1']
+    );
+  });
+
+  it('returns 409 when phone is already used by another customer', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c2' }] }); // uniqueness check — duplicate found
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0999999999' });
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại đã tồn tại');
+    // UPDATE should NOT have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 400 when phone is an empty string', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại không được để trống');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when phone is whitespace-only', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '   ' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại không được để trống');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when called by a non-admin user', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${techToken}`)
+      .send({ name: 'Updated' });
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
 

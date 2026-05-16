@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../config/database';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireAdmin } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
 import { asyncHandler } from '../utils/asyncHandler';
 
@@ -70,19 +70,41 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: { ...customer.rows[0], orders: orders.rows }, error: null });
 }));
 
-router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
-  const { name, address, type, notes } = req.body as {
-    name?: string; address?: string; type?: string; notes?: string;
+router.put('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+  const { phone, name, address, type, notes } = req.body as {
+    phone?: string; name?: string; address?: string; type?: string; notes?: string;
   };
+  const trimmedPhone = phone !== undefined ? phone.trim() : undefined;
+
+  if (trimmedPhone !== undefined) {
+    if (trimmedPhone === '') {
+      res.status(400).json({ success: false, data: null, error: 'Số điện thoại không được để trống' });
+      return;
+    }
+    if (trimmedPhone.length > 20) {
+      res.status(400).json({ success: false, data: null, error: 'Số điện thoại không hợp lệ' });
+      return;
+    }
+    const duplicate = await pool.query(
+      'SELECT id FROM customers WHERE phone = $1 AND id != $2',
+      [trimmedPhone, req.params.id]
+    );
+    if (duplicate.rows[0]) {
+      res.status(409).json({ success: false, data: null, error: 'Số điện thoại đã tồn tại' });
+      return;
+    }
+  }
+
   const result = await pool.query(
     `UPDATE customers SET
-       name = COALESCE($1, name),
-       address = COALESCE($2, address),
-       type = COALESCE($3, type),
-       notes = COALESCE($4, notes),
+       phone = COALESCE($1, phone),
+       name = COALESCE($2, name),
+       address = COALESCE($3, address),
+       type = COALESCE($4, type),
+       notes = COALESCE($5, notes),
        updated_at = NOW()
-     WHERE id = $5 RETURNING *`,
-    [name, address, type, notes, req.params.id]
+     WHERE id = $6 RETURNING *`,
+    [trimmedPhone ?? null, name, address, type, notes, req.params.id]
   );
   if (!result.rows[0]) { res.status(404).json({ success: false, data: null, error: 'Không tìm thấy khách hàng' }); return; }
   await logActivity(req.user!.id, 'UPDATE_CUSTOMER', 'customer', req.params.id);
