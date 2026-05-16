@@ -17,6 +17,7 @@ const mockQuery = pool.query as jest.Mock;
 const mockLogActivity = logActivity as jest.Mock;
 const SECRET = process.env.JWT_SECRET!;
 const adminToken = jwt.sign({ id: 'u1', username: 'admin', role: 'ADMIN', branch_id: null }, SECRET, { expiresIn: '1h' });
+const techToken = jwt.sign({ id: 'u2', username: 'tech', role: 'TECHNICIAN', branch_id: 'b1' }, SECRET, { expiresIn: '1h' });
 
 function buildApp() {
   const app = express();
@@ -170,6 +171,38 @@ describe('PUT /api/customers/:id', () => {
     expect(res.body.error).toBe('Số điện thoại đã tồn tại');
     // UPDATE should NOT have been called
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 400 when phone is an empty string', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại không được để trống');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when phone is whitespace-only', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '   ' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại không được để trống');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when called by a non-admin user', async () => {
+    const res = await request(buildApp())
+      .put('/api/customers/c1')
+      .set('Authorization', `Bearer ${techToken}`)
+      .send({ name: 'Updated' });
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
 
