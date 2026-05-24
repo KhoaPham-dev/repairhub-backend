@@ -8,7 +8,7 @@ if (!process.env.JWT_SECRET) {
 
 import app from './app';
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 6061;
 
 app.listen(PORT, () => {
   console.log(`RepairHub API running on port ${PORT}`);

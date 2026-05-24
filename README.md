@@ -27,6 +27,6 @@ npm run dev
 - `npm run typecheck` — type-check without emitting
 
 ## API
-Base URL: `http://localhost:3001`
+Base URL: `http://localhost:6061`
 
 - `GET /health` — health check
