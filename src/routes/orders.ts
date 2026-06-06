@@ -303,7 +303,29 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
     pool.query('SELECT * FROM order_images WHERE order_id = $1 ORDER BY uploaded_at', [req.params.id]),
   ]);
 
-  res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows }, error: null });
+  // RH-134: for warranty orders (order_code ends with -BH), fetch source order history
+  const orderCode: string = result.rows[0].order_code ?? '';
+  let source_order_history: Record<string, unknown>[] | null = null;
+  if (orderCode.endsWith('-BH')) {
+    const sourceCode = orderCode.slice(0, -3);
+    const sourceOrder = await pool.query(
+      'SELECT id FROM orders WHERE order_code = $1',
+      [sourceCode]
+    );
+    if (sourceOrder.rows[0]) {
+      const sourceHistory = await pool.query(
+        `SELECT osh.*, u.full_name AS changed_by_name
+         FROM order_status_history osh JOIN users u ON u.id = osh.changed_by
+         WHERE osh.order_id = $1 ORDER BY osh.changed_at ASC`,
+        [sourceOrder.rows[0].id]
+      );
+      source_order_history = sourceHistory.rows;
+    } else {
+      source_order_history = [];
+    }
+  }
+
+  res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows, source_order_history }, error: null });
 }));
 
 router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
@@ -336,6 +358,26 @@ router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
   if (hasFieldUpdate) {
     params.push(req.params.id);
     await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idx}`, params);
+  }
+
+  // RH-133: record warranty duration changes in order status history
+  const oldWarranty = order.rows[0].warranty_period_months;
+  const warrantyChanged =
+    warranty_period_months !== undefined &&
+    warranty_period_months !== null &&
+    warranty_period_months !== oldWarranty;
+
+  if (warrantyChanged) {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, changed_by, old_status, new_status, notes)
+       VALUES ($1,$2,$3,$3,$4)`,
+      [
+        req.params.id,
+        req.user!.id,
+        order.rows[0].status,
+        `Cập nhật bảo hành: ${oldWarranty} tháng → ${warranty_period_months} tháng`,
+      ]
+    );
   }
 
   if (hasNotes) {
