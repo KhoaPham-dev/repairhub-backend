@@ -413,7 +413,7 @@ describe('GET /api/orders/:id', () => {
   });
 
   it('returns order with history and images', async () => {
-    const order = { id: 'o1', status: 'TIEP_NHAN' };
+    const order = { id: 'o1', order_code: 'ORD001', status: 'TIEP_NHAN' };
     mockQuery
       .mockResolvedValueOnce({ rows: [order] })
       .mockResolvedValueOnce({ rows: [] }) // history
@@ -422,6 +422,59 @@ describe('GET /api/orders/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.history).toEqual([]);
     expect(res.body.data.images).toEqual([]);
+  });
+
+  // RH-134: source_order_history tests
+  it('returns source_order_history=null for non-BH orders', async () => {
+    const order = { id: 'o1', order_code: 'ORD001', status: 'TIEP_NHAN' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })
+      .mockResolvedValueOnce({ rows: [] }) // history
+      .mockResolvedValueOnce({ rows: [] }); // images
+    const res = await request(buildApp()).get('/api/orders/o1').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.source_order_history).toBeNull();
+  });
+
+  it('returns source_order_history with rows for BH order when source order exists', async () => {
+    const bhOrder = { id: 'bh1', order_code: 'ORD001-BH', status: 'DANG_BAO_HANH' };
+    const sourceHistoryRow = {
+      id: 'h1',
+      changed_by: 'u1',
+      old_status: 'TIEP_NHAN',
+      new_status: 'DANG_SUA',
+      notes: 'Bắt đầu sửa',
+      changed_at: '2026-01-01T00:00:00Z',
+      changed_by_name: 'Admin',
+    };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [bhOrder] })                        // fetch BH order
+      .mockResolvedValueOnce({ rows: [] })                               // BH order history
+      .mockResolvedValueOnce({ rows: [] })                               // images
+      .mockResolvedValueOnce({ rows: [{ id: 'src1' }] })                // source order lookup
+      .mockResolvedValueOnce({ rows: [sourceHistoryRow] });              // source order history
+    const res = await request(buildApp()).get('/api/orders/bh1').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.source_order_history).toHaveLength(1);
+    expect(res.body.data.source_order_history[0].old_status).toBe('TIEP_NHAN');
+    expect(res.body.data.source_order_history[0].new_status).toBe('DANG_SUA');
+    // Verify source lookup used correct derived code (strip -BH)
+    const sourceLookupCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('order_code = $1') && call[1]?.[0] === 'ORD001'
+    );
+    expect(sourceLookupCall).toBeDefined();
+  });
+
+  it('returns source_order_history=[] for BH order when source order is not found', async () => {
+    const bhOrder = { id: 'bh2', order_code: 'MANUAL-BH', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [bhOrder] })   // fetch BH order
+      .mockResolvedValueOnce({ rows: [] })           // BH order history
+      .mockResolvedValueOnce({ rows: [] })           // images
+      .mockResolvedValueOnce({ rows: [] });          // source order not found
+    const res = await request(buildApp()).get('/api/orders/bh2').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.source_order_history).toEqual([]);
   });
 });
 
