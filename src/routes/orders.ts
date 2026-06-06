@@ -338,6 +338,26 @@ router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
     await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idx}`, params);
   }
 
+  // RH-133: record warranty duration changes in order status history
+  const oldWarranty = order.rows[0].warranty_period_months;
+  const warrantyChanged =
+    warranty_period_months !== undefined &&
+    warranty_period_months !== null &&
+    warranty_period_months !== oldWarranty;
+
+  if (warrantyChanged) {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, changed_by, old_status, new_status, notes)
+       VALUES ($1,$2,$3,$3,$4)`,
+      [
+        req.params.id,
+        req.user!.id,
+        order.rows[0].status,
+        `Cập nhật bảo hành: ${oldWarranty} tháng → ${warranty_period_months} tháng`,
+      ]
+    );
+  }
+
   if (hasNotes) {
     await pool.query(
       `INSERT INTO order_status_history (order_id, changed_by, old_status, new_status, notes)

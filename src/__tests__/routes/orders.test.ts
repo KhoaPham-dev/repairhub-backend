@@ -500,6 +500,126 @@ describe('PUT /api/orders/:id/status', () => {
   });
 });
 
+describe('PATCH /api/orders/:id', () => {
+  it('returns 400 when no update fields are provided', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 }] });
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Không có dữ liệu/);
+  });
+
+  it('returns 404 when order not found', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .patch('/api/orders/o99')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ quotation: 500000 });
+    expect(res.status).toBe(404);
+  });
+
+  it('updates quotation without inserting history row when no notes and no warranty change', async () => {
+    const order = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 };
+    const updated = { id: 'o1', status: 'TIEP_NHAN', quotation: 500000, warranty_period_months: 3 };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })    // SELECT current order
+      .mockResolvedValueOnce({ rows: [] })          // UPDATE orders
+      .mockResolvedValueOnce({ rows: [updated] });  // SELECT updated order
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ quotation: 500000 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.quotation).toBe(500000);
+    // Only 3 queries: SELECT, UPDATE, SELECT — no history inserts
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+  });
+
+  it('inserts notes-only history row when no scalar field changes (RH-63)', async () => {
+    const order = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 };
+    const updated = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })    // SELECT current order
+      .mockResolvedValueOnce({ rows: [] })          // INSERT history (notes)
+      .mockResolvedValueOnce({ rows: [updated] });  // SELECT updated
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ notes: 'Khách đã xác nhận báo giá' });
+    expect(res.status).toBe(200);
+    const historyInsert = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('INSERT INTO order_status_history')
+    );
+    expect(historyInsert).toBeDefined();
+    expect(historyInsert![1]).toContain('Khách đã xác nhận báo giá');
+  });
+
+  // RH-133: warranty change history tests
+  it('inserts a warranty-change history row when warranty_period_months changes', async () => {
+    const order = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 };
+    const updated = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 6 };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })    // SELECT current order
+      .mockResolvedValueOnce({ rows: [] })          // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] })          // INSERT history (warranty)
+      .mockResolvedValueOnce({ rows: [updated] });  // SELECT updated
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ warranty_period_months: 6 });
+    expect(res.status).toBe(200);
+    const historyCalls = mockQuery.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('INSERT INTO order_status_history')
+    );
+    expect(historyCalls).toHaveLength(1);
+    expect(historyCalls[0][1]).toContain('Cập nhật bảo hành: 3 tháng → 6 tháng');
+  });
+
+  it('does NOT insert warranty-change history when warranty_period_months is unchanged', async () => {
+    const order = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 6 };
+    const updated = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 6 };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })    // SELECT current order
+      .mockResolvedValueOnce({ rows: [] })          // UPDATE orders (quotation changes)
+      .mockResolvedValueOnce({ rows: [updated] });  // SELECT updated
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ warranty_period_months: 6, quotation: 200000 });
+    expect(res.status).toBe(200);
+    const historyCalls = mockQuery.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('INSERT INTO order_status_history')
+    );
+    expect(historyCalls).toHaveLength(0);
+  });
+
+  it('inserts two separate history rows when both warranty changes AND notes are submitted', async () => {
+    const order = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 3 };
+    const updated = { id: 'o1', status: 'TIEP_NHAN', warranty_period_months: 12 };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [order] })    // SELECT current order
+      .mockResolvedValueOnce({ rows: [] })          // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] })          // INSERT history (warranty)
+      .mockResolvedValueOnce({ rows: [] })          // INSERT history (notes)
+      .mockResolvedValueOnce({ rows: [updated] });  // SELECT updated
+    const res = await request(buildApp())
+      .patch('/api/orders/o1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ warranty_period_months: 12, notes: 'Khách yêu cầu bảo hành dài hơn' });
+    expect(res.status).toBe(200);
+    const historyCalls = mockQuery.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('INSERT INTO order_status_history')
+    );
+    expect(historyCalls).toHaveLength(2);
+    const warrantyNote = historyCalls[0][1] as unknown[];
+    const textNote = historyCalls[1][1] as unknown[];
+    expect(warrantyNote).toContain('Cập nhật bảo hành: 3 tháng → 12 tháng');
+    expect(textNote).toContain('Khách yêu cầu bảo hành dài hơn');
+  });
+});
+
 describe('POST /api/orders/:id/images', () => {
   it('returns 404 when order not found', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] }); // order not found
