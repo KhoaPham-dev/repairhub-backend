@@ -306,6 +306,7 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   // RH-134: for warranty orders (order_code ends with -BH), fetch source order history
   const orderCode: string = result.rows[0].order_code ?? '';
   let source_order_history: Record<string, unknown>[] | null = null;
+  let source_order_id: string | null = null;
   if (orderCode.endsWith('-BH')) {
     const sourceCode = orderCode.slice(0, -3);
     const sourceOrder = await pool.query(
@@ -313,11 +314,12 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
       [sourceCode]
     );
     if (sourceOrder.rows[0]) {
+      source_order_id = sourceOrder.rows[0].id;
       const sourceHistory = await pool.query(
         `SELECT osh.*, u.full_name AS changed_by_name
          FROM order_status_history osh JOIN users u ON u.id = osh.changed_by
          WHERE osh.order_id = $1 ORDER BY osh.changed_at ASC`,
-        [sourceOrder.rows[0].id]
+        [source_order_id]
       );
       source_order_history = sourceHistory.rows;
     } else {
@@ -325,7 +327,7 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows, source_order_history }, error: null });
+  res.json({ success: true, data: { ...result.rows[0], history: history.rows, images: images.rows, source_order_history, source_order_id }, error: null });
 }));
 
 router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
