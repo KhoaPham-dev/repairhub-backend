@@ -75,8 +75,9 @@ describe('POST /api/customers', () => {
     expect(res.body.success).toBe(false);
   });
 
-  it('creates a customer and returns 201', async () => {
+  it('creates a customer and returns 201 when phone is not taken', async () => {
     const created = { id: 'c3', phone: '0900000001', name: 'Alice', type: 'RETAIL' };
+    mockQuery.mockResolvedValueOnce({ rows: [] });         // duplicate pre-check — no match
     mockQuery.mockResolvedValueOnce({ rows: [created] }); // INSERT
     const res = await request(buildApp())
       .post('/api/customers')
@@ -84,6 +85,39 @@ describe('POST /api/customers', () => {
       .send({ phone: '0900000001', name: 'Alice' });
     expect(res.status).toBe(201);
     expect(res.body.data.name).toBe('Alice');
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1',
+      ['0900000001']
+    );
+  });
+
+  it('returns 409 with existingCustomerId when phone is already taken', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c5' }] }); // duplicate pre-check — match found
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0900000001', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại đã tồn tại');
+    expect(res.body.data.existingCustomerId).toBe('c5');
+    // INSERT should NOT have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('trims whitespace from phone before duplicate pre-check on create', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c5' }] }); // duplicate found
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '  0900000001  ', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1',
+      ['0900000001']
+    );
   });
 });
 

@@ -49,6 +49,19 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
+  const existing = await pool.query(
+    'SELECT id FROM customers WHERE phone = $1',
+    [phone.trim()]
+  );
+  if (existing.rows[0]) {
+    res.status(409).json({
+      success: false,
+      data: { existingCustomerId: existing.rows[0].id },
+      error: 'Số điện thoại đã tồn tại',
+    });
+    return;
+  }
+
   const result = await pool.query(
     `INSERT INTO customers (phone, name, address, type, notes)
      VALUES ($1, $2, $3, $4, $5)
