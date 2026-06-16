@@ -75,8 +75,9 @@ describe('POST /api/customers', () => {
     expect(res.body.success).toBe(false);
   });
 
-  it('creates a customer and returns 201', async () => {
+  it('creates a customer and returns 201 when phone is not taken', async () => {
     const created = { id: 'c3', phone: '0900000001', name: 'Alice', type: 'RETAIL' };
+    mockQuery.mockResolvedValueOnce({ rows: [] });         // duplicate pre-check — no match
     mockQuery.mockResolvedValueOnce({ rows: [created] }); // INSERT
     const res = await request(buildApp())
       .post('/api/customers')
@@ -84,6 +85,53 @@ describe('POST /api/customers', () => {
       .send({ phone: '0900000001', name: 'Alice' });
     expect(res.status).toBe(201);
     expect(res.body.data.name).toBe('Alice');
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1',
+      ['0900000001']
+    );
+  });
+
+  it('returns 409 with existingCustomerId when phone is already taken', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c5' }] }); // duplicate pre-check — match found
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0900000001', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Số điện thoại đã tồn tại');
+    expect(res.body.data.existingCustomerId).toBe('c5');
+    // INSERT should NOT have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('trims whitespace from phone before duplicate pre-check on create', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c5' }] }); // duplicate found
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '  0900000001  ', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT id FROM customers WHERE phone = $1',
+      ['0900000001']
+    );
+  });
+
+  it('returns 409 when a concurrent insert wins the race (unique_violation 23505)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // pre-check — no match at check time
+    mockQuery.mockRejectedValueOnce(Object.assign(new Error('duplicate key value'), { code: '23505' })); // INSERT loses the race
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c9' }] }); // recheck — existing id
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0900000002', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Số điện thoại đã tồn tại');
+    expect(res.body.data.existingCustomerId).toBe('c9');
+    expect(mockQuery).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -195,14 +243,16 @@ describe('PUT /api/customers/:id', () => {
     expect(mockQuery).not.toHaveBeenCalled();
   });
 
-  it('returns 403 when called by a non-admin user', async () => {
+  it('allows a non-admin (technician) to update a customer', async () => {
+    const updated = { id: 'c1', phone: '0900000000', name: 'Updated' };
+    mockQuery.mockResolvedValueOnce({ rows: [updated] }); // UPDATE
     const res = await request(buildApp())
       .put('/api/customers/c1')
       .set('Authorization', `Bearer ${techToken}`)
       .send({ name: 'Updated' });
-    expect(res.status).toBe(403);
-    expect(res.body.success).toBe(false);
-    expect(mockQuery).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.name).toBe('Updated');
   });
 });
 

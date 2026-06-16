@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../config/database';
-import { authenticate, requireAdmin } from '../middleware/auth';
+import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
 import { asyncHandler } from '../utils/asyncHandler';
 
@@ -49,12 +49,41 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  const result = await pool.query(
-    `INSERT INTO customers (phone, name, address, type, notes)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [phone.trim(), name.trim(), address || null, type || 'RETAIL', notes || null]
+  const existing = await pool.query(
+    'SELECT id FROM customers WHERE phone = $1',
+    [phone.trim()]
   );
+  if (existing.rows[0]) {
+    res.status(409).json({
+      success: false,
+      data: { existingCustomerId: existing.rows[0].id },
+      error: 'Số điện thoại đã tồn tại',
+    });
+    return;
+  }
+
+  let result;
+  try {
+    result = await pool.query(
+      `INSERT INTO customers (phone, name, address, type, notes)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [phone.trim(), name.trim(), address || null, type || 'RETAIL', notes || null]
+    );
+  } catch (err) {
+    // Race condition: another request inserted the same phone between the pre-check
+    // and this INSERT (Postgres unique_violation). Return the same 409 shape.
+    if ((err as { code?: string }).code === '23505') {
+      const recheck = await pool.query('SELECT id FROM customers WHERE phone = $1', [phone.trim()]);
+      res.status(409).json({
+        success: false,
+        data: { existingCustomerId: recheck.rows[0]?.id ?? null },
+        error: 'Số điện thoại đã tồn tại',
+      });
+      return;
+    }
+    throw err;
+  }
   await logActivity(req.user!.id, 'CREATE_CUSTOMER', 'customer', result.rows[0].id);
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
@@ -70,7 +99,7 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: { ...customer.rows[0], orders: orders.rows }, error: null });
 }));
 
-router.put('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const { phone, name, address, type, notes } = req.body as {
     phone?: string; name?: string; address?: string; type?: string; notes?: string;
   };
