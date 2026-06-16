@@ -119,6 +119,20 @@ describe('POST /api/customers', () => {
       ['0900000001']
     );
   });
+
+  it('returns 409 when a concurrent insert wins the race (unique_violation 23505)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // pre-check — no match at check time
+    mockQuery.mockRejectedValueOnce(Object.assign(new Error('duplicate key value'), { code: '23505' })); // INSERT loses the race
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'c9' }] }); // recheck — existing id
+    const res = await request(buildApp())
+      .post('/api/customers')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ phone: '0900000002', name: 'Bob' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Số điện thoại đã tồn tại');
+    expect(res.body.data.existingCustomerId).toBe('c9');
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('GET /api/customers/:id', () => {

@@ -62,12 +62,28 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  const result = await pool.query(
-    `INSERT INTO customers (phone, name, address, type, notes)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [phone.trim(), name.trim(), address || null, type || 'RETAIL', notes || null]
-  );
+  let result;
+  try {
+    result = await pool.query(
+      `INSERT INTO customers (phone, name, address, type, notes)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [phone.trim(), name.trim(), address || null, type || 'RETAIL', notes || null]
+    );
+  } catch (err) {
+    // Race condition: another request inserted the same phone between the pre-check
+    // and this INSERT (Postgres unique_violation). Return the same 409 shape.
+    if ((err as { code?: string }).code === '23505') {
+      const recheck = await pool.query('SELECT id FROM customers WHERE phone = $1', [phone.trim()]);
+      res.status(409).json({
+        success: false,
+        data: { existingCustomerId: recheck.rows[0]?.id ?? null },
+        error: 'Số điện thoại đã tồn tại',
+      });
+      return;
+    }
+    throw err;
+  }
   await logActivity(req.user!.id, 'CREATE_CUSTOMER', 'customer', result.rows[0].id);
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
