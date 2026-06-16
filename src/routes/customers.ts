@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../config/database';
-import { authenticate, requireAdmin } from '../middleware/auth';
+import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
 import { asyncHandler } from '../utils/asyncHandler';
 
@@ -99,7 +99,7 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: { ...customer.rows[0], orders: orders.rows }, error: null });
 }));
 
-router.put('/:id', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const { phone, name, address, type, notes } = req.body as {
     phone?: string; name?: string; address?: string; type?: string; notes?: string;
   };

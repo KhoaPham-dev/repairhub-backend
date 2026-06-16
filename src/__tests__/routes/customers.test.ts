@@ -243,14 +243,16 @@ describe('PUT /api/customers/:id', () => {
     expect(mockQuery).not.toHaveBeenCalled();
   });
 
-  it('returns 403 when called by a non-admin user', async () => {
+  it('allows a non-admin (technician) to update a customer', async () => {
+    const updated = { id: 'c1', phone: '0900000000', name: 'Updated' };
+    mockQuery.mockResolvedValueOnce({ rows: [updated] }); // UPDATE
     const res = await request(buildApp())
       .put('/api/customers/c1')
       .set('Authorization', `Bearer ${techToken}`)
       .send({ name: 'Updated' });
-    expect(res.status).toBe(403);
-    expect(res.body.success).toBe(false);
-    expect(mockQuery).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.name).toBe('Updated');
   });
 });
 
