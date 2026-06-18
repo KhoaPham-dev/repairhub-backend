@@ -24,6 +24,7 @@ const storage = multer.diskStorage({
 });
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
 const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
+const VALID_IMAGE_TYPES = new Set(['INTAKE', 'COMPLETION']);
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -462,8 +463,11 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
   }
 
   const imageType = (req.body.image_type as string) || 'INTAKE';
-  const VALID_IMAGE_TYPES = new Set(['INTAKE', 'COMPLETION']);
   if (!VALID_IMAGE_TYPES.has(imageType)) {
+    // multer already wrote the files to disk; remove them so a bad request doesn't orphan files.
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
+    }
     res.status(400).json({ success: false, data: null, error: 'Loại ảnh không hợp lệ' });
     return;
   }
@@ -476,46 +480,52 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
     const originalPath = path.join(uploadDir, file.filename);
     const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
 
-    if (isHeic) {
-      // sharp's prebuilt libvips ships without the HEVC decoder, so it cannot
-      // decode iPhone HEIC. Decode with heic-convert (pure JS / libde265 wasm),
-      // then resize via sharp if the resulting JPEG is large.
-      const baseName = path.basename(file.filename, path.extname(file.filename));
-      const jpegName = `${baseName}.jpg`;
-      const jpegPath = path.join(uploadDir, jpegName);
-      const inputBuffer = await fs.promises.readFile(originalPath);
-      const jpegBuffer = Buffer.from(
-        await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
-      );
-      if (jpegBuffer.length > TWO_MB) {
-        await sharp(jpegBuffer)
+    try {
+      if (isHeic) {
+        // sharp's prebuilt libvips ships without the HEVC decoder, so it cannot
+        // decode iPhone HEIC. Decode with heic-convert (pure JS / libde265 wasm),
+        // then resize via sharp if the resulting JPEG is large.
+        const baseName = path.basename(file.filename, path.extname(file.filename));
+        const jpegName = `${baseName}.jpg`;
+        const jpegPath = path.join(uploadDir, jpegName);
+        const inputBuffer = await fs.promises.readFile(originalPath);
+        const jpegBuffer = Buffer.from(
+          await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
+        );
+        if (jpegBuffer.length > TWO_MB) {
+          await sharp(jpegBuffer)
+            .resize({ width: 1920, withoutEnlargement: true })
+            .jpeg({ quality: 75 })
+            .toFile(jpegPath);
+        } else {
+          await fs.promises.writeFile(jpegPath, jpegBuffer);
+        }
+        fs.unlinkSync(originalPath); // remove original HEIC
+        finalFilename = jpegName;
+      } else if (file.size > TWO_MB) {
+        // Resize and compress large non-HEIC images; output as JPEG
+        const baseName = path.basename(file.filename, path.extname(file.filename));
+        const compressedName = `c-${baseName}.jpg`;
+        const compressedPath = path.join(uploadDir, compressedName);
+        await sharp(originalPath)
           .resize({ width: 1920, withoutEnlargement: true })
           .jpeg({ quality: 75 })
-          .toFile(jpegPath);
-      } else {
-        await fs.promises.writeFile(jpegPath, jpegBuffer);
+          .toFile(compressedPath);
+        fs.unlinkSync(originalPath); // remove original
+        finalFilename = compressedName;
       }
-      fs.unlinkSync(originalPath); // remove original HEIC
-      finalFilename = jpegName;
-    } else if (file.size > TWO_MB) {
-      // Resize and compress large non-HEIC images; output as JPEG
-      const baseName = path.basename(file.filename, path.extname(file.filename));
-      const compressedName = `c-${baseName}.jpg`;
-      const compressedPath = path.join(uploadDir, compressedName);
-      await sharp(originalPath)
-        .resize({ width: 1920, withoutEnlargement: true })
-        .jpeg({ quality: 75 })
-        .toFile(compressedPath);
-      fs.unlinkSync(originalPath); // remove original
-      finalFilename = compressedName;
-    }
 
-    const r = await pool.query(
-      `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [req.params.id, finalFilename, imageType, req.user!.id]
-    );
-    inserted.push(r.rows[0]);
+      const r = await pool.query(
+        `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
+         VALUES ($1,$2,$3,$4) RETURNING *`,
+        [req.params.id, finalFilename, imageType, req.user!.id]
+      );
+      inserted.push(r.rows[0]);
+    } catch (err) {
+      // On a per-file failure (e.g. a corrupt HEIC), don't leave the original on disk.
+      try { fs.unlinkSync(originalPath); } catch { /* already gone */ }
+      throw err;
+    }
   }
 
   await logActivity(req.user!.id, 'UPLOAD_IMAGES', 'order', req.params.id, { count: files.length });
