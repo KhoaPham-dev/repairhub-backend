@@ -21,12 +21,19 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
   },
 });
-const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    cb(null, ALLOWED_MIME_TYPES.has(file.mimetype));
+    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
+      e.status = 400;
+      cb(e);
+    }
   },
 });
 
@@ -434,7 +441,7 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: updated.rows[0], error: null });
 }));
 
-router.post('/:id/images', upload.array('images', 10), asyncHandler(async (req: Request, res: Response) => {
+router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Request, res: Response) => {
   const orderCheck = await pool.query('SELECT created_by FROM orders WHERE id = $1', [req.params.id]);
   if (!orderCheck.rows[0]) {
     res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' });
@@ -454,20 +461,40 @@ router.post('/:id/images', upload.array('images', 10), asyncHandler(async (req: 
   }
 
   const imageType = (req.body.image_type as string) || 'INTAKE';
+  const VALID_IMAGE_TYPES = new Set(['INTAKE', 'COMPLETION']);
+  if (!VALID_IMAGE_TYPES.has(imageType)) {
+    res.status(400).json({ success: false, data: null, error: 'Loại ảnh không hợp lệ' });
+    return;
+  }
+
   const inserted = [];
   const TWO_MB = 2 * 1024 * 1024;
 
   for (const file of files) {
     let finalFilename = file.filename;
+    const originalPath = path.join(uploadDir, file.filename);
+    const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
 
-    if (file.size > TWO_MB) {
-      const compressedName = `c-${file.filename}`;
+    if (isHeic) {
+      // Convert HEIC/HEIF to JPEG regardless of file size
+      const baseName = path.basename(file.filename, path.extname(file.filename));
+      const jpegName = `${baseName}.jpg`;
+      const jpegPath = path.join(uploadDir, jpegName);
+      await sharp(originalPath)
+        .jpeg({ quality: 80 })
+        .toFile(jpegPath);
+      fs.unlinkSync(originalPath); // remove original HEIC
+      finalFilename = jpegName;
+    } else if (file.size > TWO_MB) {
+      // Resize and compress large non-HEIC images; output as JPEG
+      const baseName = path.basename(file.filename, path.extname(file.filename));
+      const compressedName = `c-${baseName}.jpg`;
       const compressedPath = path.join(uploadDir, compressedName);
-      await sharp(path.join(uploadDir, file.filename))
+      await sharp(originalPath)
         .resize({ width: 1920, withoutEnlargement: true })
         .jpeg({ quality: 75 })
         .toFile(compressedPath);
-      fs.unlinkSync(path.join(uploadDir, file.filename)); // remove original
+      fs.unlinkSync(originalPath); // remove original
       finalFilename = compressedName;
     }
 
