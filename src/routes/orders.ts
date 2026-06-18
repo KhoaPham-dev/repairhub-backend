@@ -443,6 +443,60 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: updated.rows[0], error: null });
 }));
 
+// ── Shared image-processing helper ───────────────────────────────────────────
+// Converts HEIC → JPEG (via heic-convert) and compresses >2MB images (via
+// sharp).  Returns the final stored filename.  On failure the original file
+// is removed before rethrowing so no orphaned file is left on disk.
+const TWO_MB = 2 * 1024 * 1024;
+
+export async function storeUploadedImage(file: Express.Multer.File): Promise<string> {
+  const originalPath = path.join(uploadDir, file.filename);
+  const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
+
+  try {
+    if (isHeic) {
+      // sharp's prebuilt libvips ships without the HEVC decoder, so it cannot
+      // decode iPhone HEIC. Decode with heic-convert (pure JS / libde265 wasm),
+      // then resize via sharp if the resulting JPEG is large.
+      const baseName = path.basename(file.filename, path.extname(file.filename));
+      const jpegName = `${baseName}.jpg`;
+      const jpegPath = path.join(uploadDir, jpegName);
+      const inputBuffer = await fs.promises.readFile(originalPath);
+      const jpegBuffer = Buffer.from(
+        await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
+      );
+      if (jpegBuffer.length > TWO_MB) {
+        await sharp(jpegBuffer)
+          .resize({ width: 1920, withoutEnlargement: true })
+          .jpeg({ quality: 75 })
+          .toFile(jpegPath);
+      } else {
+        await fs.promises.writeFile(jpegPath, jpegBuffer);
+      }
+      fs.unlinkSync(originalPath); // remove original HEIC
+      return jpegName;
+    } else if (file.size > TWO_MB) {
+      // Resize and compress large non-HEIC images; output as JPEG
+      const baseName = path.basename(file.filename, path.extname(file.filename));
+      const compressedName = `c-${baseName}.jpg`;
+      const compressedPath = path.join(uploadDir, compressedName);
+      await sharp(originalPath)
+        .resize({ width: 1920, withoutEnlargement: true })
+        .jpeg({ quality: 75 })
+        .toFile(compressedPath);
+      fs.unlinkSync(originalPath); // remove original
+      return compressedName;
+    }
+    return file.filename;
+  } catch (err) {
+    // On failure, remove the original so no orphaned file is left on disk.
+    try { fs.unlinkSync(originalPath); } catch { /* already gone */ }
+    throw err;
+  }
+}
+
+// ── POST /:id/images ──────────────────────────────────────────────────────────
+
 router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Request, res: Response) => {
   const orderCheck = await pool.query('SELECT created_by FROM orders WHERE id = $1', [req.params.id]);
   if (!orderCheck.rows[0]) {
@@ -473,63 +527,158 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
   }
 
   const inserted = [];
-  const TWO_MB = 2 * 1024 * 1024;
 
   for (const file of files) {
-    let finalFilename = file.filename;
-    const originalPath = path.join(uploadDir, file.filename);
-    const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
-
-    try {
-      if (isHeic) {
-        // sharp's prebuilt libvips ships without the HEVC decoder, so it cannot
-        // decode iPhone HEIC. Decode with heic-convert (pure JS / libde265 wasm),
-        // then resize via sharp if the resulting JPEG is large.
-        const baseName = path.basename(file.filename, path.extname(file.filename));
-        const jpegName = `${baseName}.jpg`;
-        const jpegPath = path.join(uploadDir, jpegName);
-        const inputBuffer = await fs.promises.readFile(originalPath);
-        const jpegBuffer = Buffer.from(
-          await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
-        );
-        if (jpegBuffer.length > TWO_MB) {
-          await sharp(jpegBuffer)
-            .resize({ width: 1920, withoutEnlargement: true })
-            .jpeg({ quality: 75 })
-            .toFile(jpegPath);
-        } else {
-          await fs.promises.writeFile(jpegPath, jpegBuffer);
-        }
-        fs.unlinkSync(originalPath); // remove original HEIC
-        finalFilename = jpegName;
-      } else if (file.size > TWO_MB) {
-        // Resize and compress large non-HEIC images; output as JPEG
-        const baseName = path.basename(file.filename, path.extname(file.filename));
-        const compressedName = `c-${baseName}.jpg`;
-        const compressedPath = path.join(uploadDir, compressedName);
-        await sharp(originalPath)
-          .resize({ width: 1920, withoutEnlargement: true })
-          .jpeg({ quality: 75 })
-          .toFile(compressedPath);
-        fs.unlinkSync(originalPath); // remove original
-        finalFilename = compressedName;
-      }
-
-      const r = await pool.query(
-        `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
-         VALUES ($1,$2,$3,$4) RETURNING *`,
-        [req.params.id, finalFilename, imageType, req.user!.id]
-      );
-      inserted.push(r.rows[0]);
-    } catch (err) {
-      // On a per-file failure (e.g. a corrupt HEIC), don't leave the original on disk.
-      try { fs.unlinkSync(originalPath); } catch { /* already gone */ }
-      throw err;
-    }
+    const finalFilename = await storeUploadedImage(file);
+    const r = await pool.query(
+      `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [req.params.id, finalFilename, imageType, req.user!.id]
+    );
+    inserted.push(r.rows[0]);
   }
 
   await logActivity(req.user!.id, 'UPLOAD_IMAGES', 'order', req.params.id, { count: files.length });
   res.status(201).json({ success: true, data: inserted, error: null });
+}));
+
+// ── POST /bulk-with-images ────────────────────────────────────────────────────
+// Atomically creates 1..N orders together with their images in a single DB
+// transaction.  On ANY failure the transaction is rolled back and every file
+// written to disk is removed so the caller can safely retry without producing
+// duplicate orders.
+
+const VALID_PRODUCT_TYPES = new Set(['SPEAKER', 'HEADPHONE', 'OTHER', 'BAO_HANH']);
+
+const uploadAny = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
+      e.status = 400;
+      cb(e);
+    }
+  },
+});
+
+router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Request, res: Response) => {
+  // ── 1. Parse and validate payload ────────────────────────────────────────
+  let payload: {
+    customer_id: string;
+    branch_id: string;
+    products: Array<{
+      product_type: string;
+      device_name: string;
+      serial_imei?: string;
+      accessories?: string;
+      fault_description: string;
+    }>;
+  };
+
+  try {
+    payload = JSON.parse(req.body.payload as string);
+  } catch {
+    res.status(400).json({ success: false, data: null, error: 'payload phải là JSON hợp lệ' });
+    return;
+  }
+
+  const { customer_id, branch_id, products } = payload;
+  if (!customer_id || !branch_id) {
+    res.status(400).json({ success: false, data: null, error: 'Thiếu customer_id hoặc branch_id' });
+    return;
+  }
+  if (!Array.isArray(products) || products.length === 0) {
+    res.status(400).json({ success: false, data: null, error: 'products phải là mảng không rỗng' });
+    return;
+  }
+  for (let i = 0; i < products.length; i++) {
+    const p = products[i];
+    if (!VALID_PRODUCT_TYPES.has(p.product_type)) {
+      res.status(400).json({ success: false, data: null, error: `Sản phẩm ${i}: product_type không hợp lệ (${p.product_type})` });
+      return;
+    }
+    if (!p.device_name || !p.fault_description) {
+      res.status(400).json({ success: false, data: null, error: `Sản phẩm ${i}: thiếu device_name hoặc fault_description` });
+      return;
+    }
+  }
+
+  // ── 2. Group uploaded files by product index ──────────────────────────────
+  // multer .any() puts all files in req.files as Express.Multer.File[] with
+  // a .fieldname property. Fields named images_<i> map to product index i.
+  const allFiles = (req.files as Express.Multer.File[]) || [];
+  const filesByProduct = new Map<number, Express.Multer.File[]>();
+  for (const file of allFiles) {
+    const match = file.fieldname.match(/^images_(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10);
+      if (!filesByProduct.has(idx)) filesByProduct.set(idx, []);
+      filesByProduct.get(idx)!.push(file);
+    }
+  }
+
+  // ── 3. Transaction ────────────────────────────────────────────────────────
+  const client = await pool.connect();
+  const writtenFiles: string[] = [];
+  const created = [];
+
+  try {
+    await client.query('BEGIN');
+
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+
+      // Insert order (mirrors POST /bulk)
+      const orderCode = await generateOrderCode();
+      const orderResult = await client.query(
+        `INSERT INTO orders
+           (order_code, customer_id, branch_id, created_by, product_type, device_name,
+            serial_imei, accessories, fault_description, quotation, warranty_period_months)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING *`,
+        [orderCode, customer_id, branch_id, req.user!.id, p.product_type,
+         p.device_name, p.serial_imei || null, p.accessories || null,
+         p.fault_description, 0, 3]
+      );
+      const newOrder = orderResult.rows[0];
+
+      await client.query(
+        `INSERT INTO order_status_history (order_id, changed_by, new_status) VALUES ($1,$2,'TIEP_NHAN')`,
+        [newOrder.id, req.user!.id]
+      );
+
+      // Process and insert images for this product
+      const productFiles = filesByProduct.get(i) || [];
+      for (const file of productFiles) {
+        const finalFilename = await storeUploadedImage(file);
+        writtenFiles.push(path.join(uploadDir, finalFilename));
+        await client.query(
+          `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
+           VALUES ($1,$2,'INTAKE',$3)`,
+          [newOrder.id, finalFilename, req.user!.id]
+        );
+      }
+
+      await logActivity(req.user!.id, 'CREATE_ORDER', 'order', newOrder.id);
+      created.push(newOrder);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    // Best-effort cleanup of any files written before the failure
+    for (const filePath of writtenFiles) {
+      try { fs.unlinkSync(filePath); } catch { /* already gone */ }
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.status(201).json({ success: true, data: created, error: null });
 }));
 
 export default router;
