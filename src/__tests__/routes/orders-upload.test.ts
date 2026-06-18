@@ -245,57 +245,16 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     expect(res.body.error).toMatch(/Ảnh quá lớn/);
   });
 
-  // ── 5. HEIC conversion ────────────────────────────────────────────────────
+  // ── 5. HEIC conversion (REAL decode) ──────────────────────────────────────
   //
-  // sharp in this environment has libheif 1.20.2 but the format registry only
-  // lists .avif as a known file suffix (not .heic). When multer writes a HEIC
-  // file to disk and sharp tries to read it, it MAY fail if the HEIC decoder
-  // is not available via file-path detection.
-  //
-  // We test the conversion CODE PATH by:
-  //   a) faking a HEIC mimetype with a minimal buffer (our mock sharp always
-  //      succeeds, so the code path is exercised even if the bytes are not
-  //      valid HEIC).
-  //   b) Asserting the stored image_path ends in .jpg.
-  //
-  // If a real HEIC fixture and real sharp HEIC decode are needed,
-  // add a separate it.skip (see below).
-
-  it('stores HEIC upload with a .jpg path (sharp mock confirms HEIC conversion path)', async () => {
-    setupOrderFound();
-    // DB insert mock: capture params[1] as image_path so we can verify it ends in .jpg
-    mockQuery.mockImplementationOnce((_sql: string, params: unknown[]) => {
-      return Promise.resolve({
-        rows: [{ id: 'img1', image_path: params[1], image_type: 'INTAKE', uploaded_by: 'u1' }],
-      });
-    });
-
-    // A small buffer that multer will accept (mimetype declared as image/heic)
-    const fakeHeicBuf = Buffer.from('heic-fake', 'utf8');
-    const res = await request(app)
-      .post('/api/orders/o1/images')
-      .set('Authorization', `Bearer ${adminToken}`)
-      .field('image_type', 'INTAKE')
-      .attach('images', fakeHeicBuf, { filename: 'photo.heic', contentType: 'image/heic' });
-
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    // The stored filename must end in .jpg (HEIC was converted)
-    const storedPath: string = res.body.data[0].image_path;
-    expect(storedPath).toMatch(/\.jpg$/);
-    expect(storedPath).not.toMatch(/\.heic$/);
-  });
-
-  // Skip: real HEIC decode with an actual HEIC fixture byte stream.
-  // libheif is present (1.20.2) but sharp's file-suffix registry only lists .avif;
-  // actual HEIC decode via file path may not work unless vips was built with
-  // HEIC file-format detection. Enable once a .heic fixture is available and
-  // confirmed to decode in this environment.
-  it.skip('decodes a real HEIC fixture and stores as .jpg (requires libvips HEIC support)', async () => {
-    // To enable: place a tiny real HEIC file at src/__tests__/fixtures/tiny.heic
-    // then remove the skip.
+  // sharp's prebuilt libvips ships without the HEVC decoder, so HEIC is decoded
+  // with heic-convert (pure JS / libde265 wasm), which is NOT mocked here. We
+  // upload a real, tiny HEIC fixture (generated via macOS `sips`) and assert it
+  // is decoded and stored as a .jpg. heic-convert works cross-platform (incl. CI),
+  // so this is a genuine end-to-end conversion test.
+  it('decodes a real HEIC fixture and stores it as a .jpg', async () => {
     const fixturePath = path.join(__dirname, '../fixtures/tiny.heic');
-    if (!fs.existsSync(fixturePath)) return;
+    const heicBuf = fs.readFileSync(fixturePath);
 
     setupOrderFound();
     mockQuery.mockImplementationOnce((_sql: string, params: unknown[]) => {
@@ -304,7 +263,6 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
       });
     });
 
-    const heicBuf = fs.readFileSync(fixturePath);
     const res = await request(app)
       .post('/api/orders/o1/images')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -312,7 +270,10 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
       .attach('images', heicBuf, { filename: 'tiny.heic', contentType: 'image/heic' });
 
     expect(res.status).toBe(201);
-    expect(res.body.data[0].image_path).toMatch(/\.jpg$/);
+    expect(res.body.success).toBe(true);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.jpg$/);
+    expect(storedPath).not.toMatch(/\.heic$/);
   });
 
   // ── 6. Valid COMPLETION image_type ────────────────────────────────────────

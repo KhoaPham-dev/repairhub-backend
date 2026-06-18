@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import sharp from 'sharp';
+import heicConvert from 'heic-convert';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
@@ -476,13 +477,24 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
     const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
 
     if (isHeic) {
-      // Convert HEIC/HEIF to JPEG regardless of file size
+      // sharp's prebuilt libvips ships without the HEVC decoder, so it cannot
+      // decode iPhone HEIC. Decode with heic-convert (pure JS / libde265 wasm),
+      // then resize via sharp if the resulting JPEG is large.
       const baseName = path.basename(file.filename, path.extname(file.filename));
       const jpegName = `${baseName}.jpg`;
       const jpegPath = path.join(uploadDir, jpegName);
-      await sharp(originalPath)
-        .jpeg({ quality: 80 })
-        .toFile(jpegPath);
+      const inputBuffer = await fs.promises.readFile(originalPath);
+      const jpegBuffer = Buffer.from(
+        await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
+      );
+      if (jpegBuffer.length > TWO_MB) {
+        await sharp(jpegBuffer)
+          .resize({ width: 1920, withoutEnlargement: true })
+          .jpeg({ quality: 75 })
+          .toFile(jpegPath);
+      } else {
+        await fs.promises.writeFile(jpegPath, jpegBuffer);
+      }
       fs.unlinkSync(originalPath); // remove original HEIC
       finalFilename = jpegName;
     } else if (file.size > TWO_MB) {
