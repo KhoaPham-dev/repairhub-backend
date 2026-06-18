@@ -13,6 +13,7 @@ jest.mock('../../utils/activityLog', () => ({
 jest.mock('multer', () => {
   const multer = () => ({
     array: () => (req: any, res: any, next: any) => next(),
+    any: () => (req: any, res: any, next: any) => next(),
   });
   multer.diskStorage = () => ({});
   return multer;
