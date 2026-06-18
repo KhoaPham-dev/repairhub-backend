@@ -452,6 +452,7 @@ const TWO_MB = 2 * 1024 * 1024;
 export async function storeUploadedImage(file: Express.Multer.File): Promise<string> {
   const originalPath = path.join(uploadDir, file.filename);
   const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
+  let outputPath: string | undefined; // a converted/compressed file we may have started writing
 
   try {
     if (isHeic) {
@@ -460,7 +461,7 @@ export async function storeUploadedImage(file: Express.Multer.File): Promise<str
       // then resize via sharp if the resulting JPEG is large.
       const baseName = path.basename(file.filename, path.extname(file.filename));
       const jpegName = `${baseName}.jpg`;
-      const jpegPath = path.join(uploadDir, jpegName);
+      outputPath = path.join(uploadDir, jpegName);
       const inputBuffer = await fs.promises.readFile(originalPath);
       const jpegBuffer = Buffer.from(
         await heicConvert({ buffer: inputBuffer, format: 'JPEG', quality: 0.8 })
@@ -469,9 +470,9 @@ export async function storeUploadedImage(file: Express.Multer.File): Promise<str
         await sharp(jpegBuffer)
           .resize({ width: 1920, withoutEnlargement: true })
           .jpeg({ quality: 75 })
-          .toFile(jpegPath);
+          .toFile(outputPath);
       } else {
-        await fs.promises.writeFile(jpegPath, jpegBuffer);
+        await fs.promises.writeFile(outputPath, jpegBuffer);
       }
       fs.unlinkSync(originalPath); // remove original HEIC
       return jpegName;
@@ -479,18 +480,20 @@ export async function storeUploadedImage(file: Express.Multer.File): Promise<str
       // Resize and compress large non-HEIC images; output as JPEG
       const baseName = path.basename(file.filename, path.extname(file.filename));
       const compressedName = `c-${baseName}.jpg`;
-      const compressedPath = path.join(uploadDir, compressedName);
+      outputPath = path.join(uploadDir, compressedName);
       await sharp(originalPath)
         .resize({ width: 1920, withoutEnlargement: true })
         .jpeg({ quality: 75 })
-        .toFile(compressedPath);
+        .toFile(outputPath);
       fs.unlinkSync(originalPath); // remove original
       return compressedName;
     }
     return file.filename;
   } catch (err) {
-    // On failure, remove the original so no orphaned file is left on disk.
+    // On failure, remove the original AND any partially-written output so no
+    // orphaned file is left on disk (e.g. if toFile/writeFile threw mid-write).
     try { fs.unlinkSync(originalPath); } catch { /* already gone */ }
+    if (outputPath) { try { fs.unlinkSync(outputPath); } catch { /* never written / already gone */ } }
     throw err;
   }
 }
@@ -592,6 +595,10 @@ router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Reque
   }
   if (!Array.isArray(products) || products.length === 0) {
     res.status(400).json({ success: false, data: null, error: 'products phải là mảng không rỗng' });
+    return;
+  }
+  if (products.length > 20) {
+    res.status(400).json({ success: false, data: null, error: 'Tối đa 20 sản phẩm mỗi lần tạo' });
     return;
   }
   for (let i = 0; i < products.length; i++) {

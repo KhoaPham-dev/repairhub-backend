@@ -349,6 +349,20 @@ describe('POST /api/orders/bulk-with-images — validation (RH-142)', () => {
     expect(res.body.error).toMatch(/products/);
   });
 
+  it('returns 400 when more than 20 products are submitted', async () => {
+    const products = Array.from({ length: 21 }, (_, i) => ({
+      product_type: 'SPEAKER', device_name: `dev${i}`, fault_description: 'loi',
+    }));
+    const payload = JSON.stringify({ customer_id: 'c1', branch_id: 'b1', products });
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/20/);
+  });
+
   it('returns 400 when a product has an invalid product_type', async () => {
     const payload = JSON.stringify({
       customer_id: 'c1',
