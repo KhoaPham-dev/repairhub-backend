@@ -184,9 +184,9 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
 
-router.post('/warranty-claim', asyncHandler(async (req: Request, res: Response) => {
-  const { source_order_id, branch_id, notes } = req.body as {
-    source_order_id: string; branch_id: string; notes?: string;
+router.post('/warranty-claim', upload.any(), asyncHandler(async (req: Request, res: Response) => {
+  const { source_order_id, branch_id, fault_description } = req.body as {
+    source_order_id: string; branch_id: string; fault_description?: string;
   };
 
   if (!source_order_id || !branch_id) {
@@ -220,14 +220,26 @@ router.post('/warranty-claim', asyncHandler(async (req: Request, res: Response) 
      RETURNING *`,
     [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
      sourceOrder.device_name, sourceOrder.serial_imei,
-     notes || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
+     fault_description || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
   );
 
   await pool.query(
     `INSERT INTO order_status_history (order_id, changed_by, new_status, notes)
      VALUES ($1,$2,'DANG_BAO_HANH',$3)`,
-    [result.rows[0].id, req.user!.id, notes || null]
+    [result.rows[0].id, req.user!.id, fault_description || null]
   );
+
+  // Process and insert images for this warranty order
+  const files = req.files as Express.Multer.File[] || [];
+  for (const file of files) {
+    const finalFilename = await storeUploadedImage(file);
+    await pool.query(
+      `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
+       VALUES ($1,$2,'INTAKE',$3)`,
+      [result.rows[0].id, finalFilename, req.user!.id]
+    );
+  }
+
   await logActivity(req.user!.id, 'CREATE_WARRANTY_ORDER', 'order', result.rows[0].id, { source: source_order_id });
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
