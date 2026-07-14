@@ -39,6 +39,21 @@ const upload = multer({
   },
 });
 
+// Warranty claim upload config with explicit file count limit
+const warrantyUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
+      e.status = 400;
+      cb(e);
+    }
+  },
+});
+
 const STATUS_FLOW = [
   'TIEP_NHAN', 'DANG_KIEM_TRA', 'BAO_GIA',
   'DANG_SUA_CHUA', 'SUA_XONG', 'DA_GIAO',
@@ -509,23 +524,6 @@ export async function storeUploadedImage(file: Express.Multer.File): Promise<str
     throw err;
   }
 }
-
-// ── POST /warranty-claim images upload ────────────────────────────────────────
-// Reuse the same upload config as other image endpoints, with explicit limits.
-
-const warrantyUpload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
-      e.status = 400;
-      cb(e);
-    }
-  },
-});
 
 // ── POST /:id/images ──────────────────────────────────────────────────────────
 
