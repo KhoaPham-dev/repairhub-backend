@@ -184,7 +184,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json({ success: true, data: result.rows[0], error: null });
 }));
 
-router.post('/warranty-claim', upload.any(), asyncHandler(async (req: Request, res: Response) => {
+router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Request, res: Response) => {
   const { source_order_id, branch_id, fault_description } = req.body as {
     source_order_id: string; branch_id: string; fault_description?: string;
   };
@@ -509,6 +509,23 @@ export async function storeUploadedImage(file: Express.Multer.File): Promise<str
     throw err;
   }
 }
+
+// ── POST /warranty-claim images upload ────────────────────────────────────────
+// Reuse the same upload config as other image endpoints, with explicit limits.
+
+const warrantyUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
+      e.status = 400;
+      cb(e);
+    }
+  },
+});
 
 // ── POST /:id/images ──────────────────────────────────────────────────────────
 
