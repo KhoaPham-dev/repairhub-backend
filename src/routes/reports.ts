@@ -36,13 +36,14 @@ router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
   if (period === 'this_month') {
     // From 1st of current month to today (Asia/Ho_Chi_Minh)
     periodEnd = todayVN();
-    periodStart = new Date(periodEnd.getFullYear(), periodEnd.getMonth(), 1);
+    // Use UTC to avoid timezone issues: set to 1st of month at midnight UTC
+    periodStart = new Date(Date.UTC(periodEnd.getUTCFullYear(), periodEnd.getUTCMonth(), 1));
   } else if (period === 'last_month') {
     // Full previous month (for scheduled job on 1st of month)
     const today = todayVN();
-    const prevMonthLastDay = new Date(today.getFullYear(), today.getMonth(), 0);
-    periodEnd = prevMonthLastDay;
-    periodStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    // Last day of previous month = day 0 of current month (UTC)
+    periodEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0));
+    periodStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
   } else if (period_start && period_end) {
     periodStart = new Date(period_start);
     periodEnd = new Date(period_end);
