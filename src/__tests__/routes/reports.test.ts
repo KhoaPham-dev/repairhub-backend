@@ -163,6 +163,55 @@ describe('POST /api/reports/generate', () => {
     expect(diffDays).toBe(13);
   });
 
+  it('generates report for this_month when period=this_month', async () => {
+    const REPORT_ID = 'rr-333';
+    mockGenerate.mockResolvedValueOnce(REPORT_ID);
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: REPORT_ID, status: 'done', period_start: '2026-05-01', period_end: '2026-05-11', generated_at: '2026-05-11T00:00:00Z', error: null, file_path: null }],
+    });
+
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period: 'this_month' });
+
+    expect(res.status).toBe(201);
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    const [start, end] = mockGenerate.mock.calls[0] as [Date, Date];
+    // Should be from 1st of current month to today
+    expect(start.getDate()).toBe(1);
+    expect(start.getMonth()).toBe(4); // May (0-indexed)
+    expect(start.getFullYear()).toBe(2026);
+    // End should be today (mocked to May 11)
+    expect(end.getDate()).toBe(11);
+    expect(end.getMonth()).toBe(4);
+    expect(end.getFullYear()).toBe(2026);
+  });
+
+  it('generates report for last_month when period=last_month', async () => {
+    const REPORT_ID = 'rr-444';
+    mockGenerate.mockResolvedValueOnce(REPORT_ID);
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: REPORT_ID, status: 'done', period_start: '2026-04-01', period_end: '2026-04-30', generated_at: '2026-05-01T00:00:00Z', error: null, file_path: null }],
+    });
+
+    const res = await request(buildApp())
+      .post('/api/reports/generate')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ period: 'last_month' });
+
+    expect(res.status).toBe(201);
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    const [start, end] = mockGenerate.mock.calls[0] as [Date, Date];
+    // Should be full previous month (April 1-30, given mock today is May 11)
+    expect(start.getDate()).toBe(1);
+    expect(start.getMonth()).toBe(3); // April (0-indexed)
+    expect(start.getFullYear()).toBe(2026);
+    expect(end.getDate()).toBe(30);
+    expect(end.getMonth()).toBe(3);
+    expect(end.getFullYear()).toBe(2026);
+  });
+
   it('returns 400 when period_start is invalid', async () => {
     const res = await request(buildApp())
       .post('/api/reports/generate')

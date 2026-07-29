@@ -24,12 +24,26 @@ router.get('/', asyncHandler(async (_req: Request, res: Response) => {
 
 // POST /generate — generate a report (awaited, returns 201 with report data)
 router.post('/generate', asyncHandler(async (req: Request, res: Response) => {
-  const { period_start, period_end } = req.body as { period_start?: string; period_end?: string };
+  const { period_start, period_end, period } = req.body as {
+    period_start?: string;
+    period_end?: string;
+    period?: 'this_month' | 'last_month';
+  };
 
   let periodEnd: Date;
   let periodStart: Date;
 
-  if (period_start && period_end) {
+  if (period === 'this_month') {
+    // From 1st of current month to today (Asia/Ho_Chi_Minh)
+    periodEnd = todayVN();
+    periodStart = new Date(periodEnd.getFullYear(), periodEnd.getMonth(), 1);
+  } else if (period === 'last_month') {
+    // Full previous month (for scheduled job on 1st of month)
+    const today = todayVN();
+    const prevMonthLastDay = new Date(today.getFullYear(), today.getMonth(), 0);
+    periodEnd = prevMonthLastDay;
+    periodStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  } else if (period_start && period_end) {
     periodStart = new Date(period_start);
     periodEnd = new Date(period_end);
 
