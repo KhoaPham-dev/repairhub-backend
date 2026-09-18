@@ -113,7 +113,10 @@ const QUICKTIME_LEGACY_ATOMS = new Set(['wide', 'mdat', 'moov', 'free', 'skip', 
 const QUICKTIME_ATOM_TYPES = new Set([
   'ftyp', 'wide', 'free', 'skip', 'mdat', 'moov', 'pnot', 'uuid', 'junk',
 ]);
-const MAX_QUICKTIME_ATOMS_TO_WALK = 4;
+// Real QuickTime files put mdat/moov within the first 2-3 top-level atoms;
+// 8 leaves headroom for a few leading wide/free/skip/uuid boxes while still
+// bounding the work done per upload.
+const MAX_QUICKTIME_ATOMS_TO_WALK = 8;
 
 // Reads the ISO-BMFF ftyp box's major brand plus its compatible brands
 // (4 bytes each, from offset 16 up to the box's own declared size or the

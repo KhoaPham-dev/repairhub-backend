@@ -834,6 +834,35 @@ describe('POST /api/orders/:id/images — content detection overrides a misleadi
     expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.mov');
   });
 
+  it('accepts a legacy mov whose mdat is the 6th top-level atom (within the walk limit)', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const buf = Buffer.concat([
+      makeAtom('wide'), makeAtom('free'), makeAtom('skip'), makeAtom('uuid'), makeAtom('junk'),
+      makeAtom('mdat', Buffer.from('fake mdat payload', 'ascii')),
+    ]);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', buf, { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data[0].image_path).toMatch(/\.mov$/);
+  });
+
+  it('rejects a legacy mov whose first mdat/moov lies beyond the 8-atom walk limit', async () => {
+    setupOrderFound();
+    const leading = ['wide', 'free', 'skip', 'uuid', 'junk', 'free', 'skip', 'wide'].map((t) => makeAtom(t));
+    const buf = Buffer.concat([...leading, makeAtom('mdat', Buffer.from('fake mdat payload', 'ascii'))]);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', buf, { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.mov');
+  });
+
   it('accepts a "wide" box prepended to a real mov-style layout (ftyp/moov/mdat)', async () => {
     setupOrderFound();
     setupInsertImageEcho(1);
