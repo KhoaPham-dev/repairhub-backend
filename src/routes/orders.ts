@@ -40,6 +40,7 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB — enforced per-file, after mu
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB — multer's single request-wide fileSize cap
 const OVERSIZED_IMAGE_MESSAGE = 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)';
 const INVALID_FILE_CONTENT_MESSAGE = 'Nội dung tệp không khớp định dạng';
+const FILE_PROCESSING_ERROR_MESSAGE = 'Không thể xử lý tệp đã tải lên, vui lòng thử lại';
 
 // Per-route file-count caps (multer `limits.files`). Named so the intent is
 // clear at each createMediaUpload() call site; LIMIT_FILE_COUNT is mapped to
@@ -105,6 +106,14 @@ function readFileHeader(filePath: string): Buffer {
 
 const HEIC_ISOBMFF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1']);
 const QUICKTIME_LEGACY_ATOMS = new Set(['wide', 'mdat', 'moov', 'free', 'skip', 'pnot']);
+// Recognized top-level QuickTime/ISO-BMFF atom types for the legacy-.mov
+// file-structure walk (isLegacyQuickTimeFile). 'uuid' and 'junk' are
+// included alongside the standard set since some encoders emit them as
+// filler/extension atoms before the real moov/mdat payload.
+const QUICKTIME_ATOM_TYPES = new Set([
+  'ftyp', 'wide', 'free', 'skip', 'mdat', 'moov', 'pnot', 'uuid', 'junk',
+]);
+const MAX_QUICKTIME_ATOMS_TO_WALK = 4;
 
 // Reads the ISO-BMFF ftyp box's major brand plus its compatible brands
 // (4 bytes each, from offset 16 up to the box's own declared size or the
@@ -120,13 +129,80 @@ function readIsoBmffBrands(header: Buffer): string[] {
   return brands.map((b) => b.toLowerCase());
 }
 
+// Walks up to MAX_QUICKTIME_ATOMS_TO_WALK top-level QuickTime/ISO-BMFF atoms
+// directly from the file on disk (not limited to the small in-memory
+// header), to distinguish a genuine legacy QuickTime .mov (no leading ftyp
+// box) from an arbitrary file that merely happens to have a recognized atom
+// NAME at offset 4 with garbage after it — e.g. `00000008 'wide' <HTML>`
+// must NOT be accepted just because byte 4-8 spells "wide".
+//
+// Each atom's declared size is validated (>=8, size==1 uses the 64-bit
+// largesize that follows the type, size==0 means "extends to end of file"
+// — which is only meaningful for the atom actually at EOF, and the offset
+// arithmetic here naturally treats it as such) and its type must be a
+// known QuickTime/ISO atom. The walk only succeeds — i.e. the file is
+// accepted as video/quicktime — once a structurally valid `moov` or `mdat`
+// atom is found among the walked atoms.
+function isLegacyQuickTimeFile(filePath: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch {
+    return false;
+  }
+
+  try {
+    const fileSize = fs.fstatSync(fd).size;
+    let offset = 0;
+    const atomHeader = Buffer.alloc(16); // size(4) + type(4) + largesize(8, if size==1)
+
+    for (let i = 0; i < MAX_QUICKTIME_ATOMS_TO_WALK && offset < fileSize; i++) {
+      if (offset + 8 > fileSize) return false; // not enough room left for a basic atom header
+      const bytesRead = fs.readSync(fd, atomHeader, 0, 16, offset);
+      if (bytesRead < 8) return false;
+
+      const declaredSize = atomHeader.readUInt32BE(0);
+      const type = atomHeader.toString('ascii', 4, 8);
+      let size: number;
+
+      if (declaredSize === 1) {
+        if (bytesRead < 16) return false;
+        const largesizeHigh = atomHeader.readUInt32BE(8);
+        const largesizeLow = atomHeader.readUInt32BE(12);
+        // A largesize this big can't be a real atom in a file we can even
+        // stat the size of — treat as structurally invalid.
+        if (largesizeHigh !== 0 || largesizeLow > fileSize) return false;
+        size = largesizeLow;
+      } else if (declaredSize === 0) {
+        // "Extends to end of file" — by construction this makes the atom
+        // the last one walked, since offset + size will equal fileSize.
+        size = fileSize - offset;
+      } else {
+        size = declaredSize;
+      }
+
+      if (size < 8 || offset + size > fileSize) return false;
+      if (!QUICKTIME_ATOM_TYPES.has(type)) return false;
+      if (type === 'moov' || type === 'mdat') return true;
+
+      offset += size;
+    }
+
+    return false;
+  } catch {
+    return false;
+  } finally {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
 // Detects the real media type from magic bytes / ISO-BMFF box structure,
 // independent of the declared mimetype. Browsers set Content-Type from the
 // file EXTENSION, not the content — real-world photos/videos routinely have
 // the "wrong" extension (a PNG/WebP/HEIC saved as .jpg by a messaging app,
 // or a legacy QuickTime .mov with no leading ftyp box). Returns one of the
 // allowed mimetypes, or null if the content doesn't match any of them.
-function detectMediaType(header: Buffer): string | null {
+function detectMediaType(header: Buffer, filePath: string): string | null {
   if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
     return 'image/jpeg';
   }
@@ -148,6 +224,14 @@ function detectMediaType(header: Buffer): string | null {
   if (header.length >= 8) {
     const atomType = header.toString('ascii', 4, 8);
     if (atomType === 'ftyp') {
+      const boxSize = header.length >= 4 ? header.readUInt32BE(0) : 0;
+      // size==1 means the real box size is a 64-bit "largesize" that
+      // follows the type, which shifts the major-brand field further into
+      // the box — reading offset 8-12 as-is in that case would read the
+      // largesize's own bytes, not the brand, and could let a disallowed
+      // brand (e.g. AVIF) slip through as an unrecognized-but-accepted mp4.
+      // No real encoder emits a 64-bit ftyp box; reject outright.
+      if (boxSize === 1) return null;
       const majorBrand = header.length >= 12 ? header.toString('ascii', 8, 12).toLowerCase() : '';
       // mif1/msf1 are shared with AVIF, which isn't an allowed type — the
       // major brand (not a compatible brand) is what actually identifies a
@@ -160,7 +244,10 @@ function detectMediaType(header: Buffer): string | null {
       return 'video/mp4';
     }
     // Legacy QuickTime .mov files can lead with a non-ftyp top-level atom.
-    if (QUICKTIME_LEGACY_ATOMS.has(atomType)) {
+    // A bare 4-byte type match at this offset is not enough on its own
+    // (e.g. `00000008 'wide' <HTML>` must not pass) — walk the actual atom
+    // structure on disk to confirm it's really a QuickTime file.
+    if (QUICKTIME_LEGACY_ATOMS.has(atomType) && isLegacyQuickTimeFile(filePath)) {
       return 'video/quicktime';
     }
   }
@@ -168,12 +255,31 @@ function detectMediaType(header: Buffer): string | null {
   return null;
 }
 
-// Strips control characters and caps the length before an
-// attacker-controlled originalname is echoed back to the client.
+// Strips control characters and Unicode bidi/format characters (which can
+// be used to visually spoof a filename — e.g. right-to-left overrides) and
+// caps the length before an attacker-controlled originalname is echoed back
+// to the client. Truncates by Unicode code point (via Array.from) rather
+// than by UTF-16 code unit, so a surrogate pair is never split in half.
+// Built via `new RegExp` from explicit \u escapes (rather than a /.../ regex
+// literal) so the source file never contains the actual invisible/bidi
+// characters themselves — only their escaped, reviewable code points.
+const FILENAME_STRIP_PATTERN = new RegExp(
+  '[\\x00-\\x1f\\x7f' + // ASCII control characters
+  '\\u200B-\\u200F' + // zero-width space/joiners, LRM/RLM
+  '\\u202A-\\u202E' + // LRE/RLE/PDF/LRO/RLO (bidi embedding/override)
+  '\\u2066-\\u2069' + // LRI/RLI/FSI/PDI (bidi isolates)
+  '\\uFEFF' + // BOM / zero-width no-break space
+  ']',
+  'g'
+);
+const FILENAME_MAX_CODEPOINTS = 100;
+
 export function sanitizeOriginalFilename(name: string): string {
-  // eslint-disable-next-line no-control-regex
-  const stripped = (name || '').replace(/[\x00-\x1f\x7f]/g, '');
-  return stripped.length > 100 ? stripped.slice(0, 100) : stripped;
+  const stripped = (name || '').replace(FILENAME_STRIP_PATTERN, '');
+  const codePoints = Array.from(stripped);
+  return codePoints.length > FILENAME_MAX_CODEPOINTS
+    ? codePoints.slice(0, FILENAME_MAX_CODEPOINTS).join('')
+    : stripped;
 }
 
 // Runs ALL post-multer file validation before any DB write: detects the
@@ -192,8 +298,9 @@ export function sanitizeOriginalFilename(name: string): string {
 // (MAX_VIDEO_SIZE) and are not size-checked here.
 function validateUploadedFiles(files: Express.Multer.File[]): string | null {
   for (const f of files) {
-    const header = readFileHeader(path.join(uploadDir, f.filename));
-    const detectedType = detectMediaType(header);
+    const filePath = path.join(uploadDir, f.filename);
+    const header = readFileHeader(filePath);
+    const detectedType = detectMediaType(header, filePath);
     if (!detectedType) {
       deleteUploadedFiles(files);
       return `${INVALID_FILE_CONTENT_MESSAGE}: ${sanitizeOriginalFilename(f.originalname)}`;
@@ -208,8 +315,20 @@ function validateUploadedFiles(files: Express.Multer.File[]): string | null {
     const currentExt = path.extname(f.filename);
     if (detectedExt && detectedExt !== currentExt) {
       const newFilename = `${path.basename(f.filename, currentExt)}${detectedExt}`;
-      fs.renameSync(path.join(uploadDir, f.filename), path.join(uploadDir, newFilename));
+      const newPath = path.join(uploadDir, newFilename);
+      try {
+        fs.renameSync(filePath, newPath);
+      } catch {
+        // Delete every file from the request — files array entries already
+        // processed in this loop have their .filename mutated to the NEW
+        // name, so deleteUploadedFiles naturally targets the right path
+        // for those; this (failed) file and any not-yet-processed ones are
+        // still under their original names.
+        deleteUploadedFiles(files);
+        return FILE_PROCESSING_ERROR_MESSAGE;
+      }
       f.filename = newFilename;
+      f.path = newPath;
     }
     f.mimetype = detectedType;
   }
@@ -821,7 +940,14 @@ export async function storeUploadedMedia(file: Express.Multer.File): Promise<str
       outputPath = path.join(uploadDir, compressedName);
       let pipeline = sharp(originalPath).resize({ width: 1920, withoutEnlargement: true });
       if (file.mimetype === 'image/png') {
-        pipeline = pipeline.png({ quality: 75 });
+        // sharp's png() `quality` option only has an effect in palette
+        // (indexed-color) mode — for a normal full-color PNG it's silently
+        // ignored and the file is re-encoded losslessly at whatever the
+        // default compression level is. Shrink it losslessly instead via
+        // the zlib compression level and adaptive filtering; this won't
+        // reduce file size anywhere near as much as JPEG's lossy quality
+        // knob, but it does actually do something (unlike bare quality).
+        pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
       } else if (file.mimetype === 'image/webp') {
         pipeline = pipeline.webp({ quality: 75 });
       } else {

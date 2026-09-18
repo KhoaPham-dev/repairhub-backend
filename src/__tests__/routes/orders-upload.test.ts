@@ -190,16 +190,61 @@ function fakeWebmBuffer(): Buffer {
   return Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00]);
 }
 
+/** Builds a single QuickTime/ISO-BMFF top-level atom: size(4) + type(4) + body. */
+function makeAtom(type: string, body: Buffer = Buffer.alloc(0)): Buffer {
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(8 + body.length, 0);
+  header.write(type.padEnd(4, ' '), 4, 4, 'ascii');
+  return Buffer.concat([header, body]);
+}
+
 /**
- * A legacy QuickTime .mov top-level atom with no leading ftyp box — the
- * box-size + 4-char atom type (wide/mdat/moov/free/skip/pnot) at offset 4.
+ * A legacy QuickTime .mov with no leading ftyp box: a top-level atom of the
+ * given type, followed by a real `mdat` atom — structurally valid, so the
+ * on-disk atom walk finds the mdat and accepts it as quicktime.
  */
 function fakeQuickTimeLegacyBuffer(atomType: string): Buffer {
+  const leadingAtom = makeAtom(atomType);
+  const mdatAtom = makeAtom('mdat', Buffer.from('fake mdat payload', 'ascii'));
+  return Buffer.concat([leadingAtom, mdatAtom]);
+}
+
+/**
+ * A bare `wide` atom (size 8, no body) immediately followed by arbitrary
+ * HTML bytes with no valid atom structure — must be rejected: a recognized
+ * atom NAME at offset 4 alone is not enough without a structurally valid
+ * moov/mdat atom actually present.
+ */
+function fakeWideAtomFollowedByHtmlBuffer(): Buffer {
   return Buffer.concat([
-    Buffer.from([0x00, 0x00, 0x00, 0x08]),
-    Buffer.from(atomType.padEnd(4, ' '), 'ascii'),
-    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    makeAtom('wide'),
+    Buffer.from('<html><body>not a real atom</body></html>', 'utf8'),
   ]);
+}
+
+/** A `free` atom whose declared size is larger than the buffer actually is. */
+function fakeOversizedFreeAtomBuffer(): Buffer {
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(10_000_000, 0); // declared size — far larger than this buffer
+  header.write('free', 4, 4, 'ascii');
+  return header; // only 8 bytes actually present
+}
+
+/**
+ * Mimics a real legacy QuickTime .mov layout: a `wide` placeholder atom
+ * (used by QuickTime for later in-place mdat expansion) followed by the
+ * real ftyp/moov/mdat atoms. No binary .mov fixture is checked into the
+ * repo, so this synthetic-but-structurally-realistic layout stands in for
+ * "a wide box prepended to a real mov".
+ */
+function fakeLegacyQuickTimeMovieBuffer(): Buffer {
+  const wideAtom = makeAtom('wide');
+  const ftypAtom = makeAtom('ftyp', Buffer.concat([
+    Buffer.from('qt  ', 'ascii'), Buffer.from([0, 0, 0, 0]), Buffer.from('qt  ', 'ascii'),
+  ]));
+  const moovAtom = makeAtom('moov', Buffer.from('fake moov payload', 'ascii'));
+  const mdatAtom = makeAtom('mdat', Buffer.from('fake mdat payload', 'ascii'));
+  return Buffer.concat([wideAtom, ftypAtom, moovAtom, mdatAtom]);
 }
 
 /** An ISO-BMFF ftyp box whose major brand is 'qt  ' (QuickTime). */
@@ -226,6 +271,23 @@ function fakeAvifBuffer(): Buffer {
     Buffer.from([0x00, 0x00, 0x00, 0x00]), // minor version
     Buffer.from('mif1', 'ascii'), // compatible brand
   ]);
+}
+
+/**
+ * An ftyp box declaring size==1 (64-bit largesize follows the type), with
+ * an AVIF major brand placed at the REAL offset (16, after the largesize
+ * field) — if detection naively read offset 8-12 as the major brand (as if
+ * size were a normal 32-bit value) it would read the largesize's own bytes
+ * instead and miss the avif brand entirely, letting it fall through to the
+ * generic "any other ftyp brand -> mp4" case.
+ */
+function fakeFtypLargesizeBuffer(): Buffer {
+  const header = Buffer.alloc(16);
+  header.writeUInt32BE(1, 0); // size == 1 -> 64-bit largesize follows
+  header.write('ftyp', 4, 4, 'ascii');
+  header.writeUInt32BE(0, 8); // largesize high 32 bits
+  header.writeUInt32BE(32, 12); // largesize low 32 bits
+  return Buffer.concat([header, Buffer.from('avif', 'ascii'), Buffer.from([0, 0, 0, 0])]);
 }
 
 // Setup order-found mock so auth and order lookup succeed for all upload tests
@@ -667,6 +729,9 @@ describe('POST /api/orders/:id/images — content detection overrides a misleadi
     expect(sharpMock).toHaveBeenCalled();
     const sharpChain = sharpMock.mock.results[sharpMock.mock.results.length - 1].value;
     expect(sharpChain.png).toHaveBeenCalled();
+    // quality alone does nothing for a non-palette PNG — compressionLevel
+    // and adaptiveFiltering are what actually shrink it.
+    expect(sharpChain.png).toHaveBeenCalledWith({ compressionLevel: 9, adaptiveFiltering: true });
     expect(sharpChain.jpeg).not.toHaveBeenCalled();
   });
 
@@ -732,6 +797,56 @@ describe('POST /api/orders/:id/images — content detection overrides a misleadi
     expect(storedPath).toMatch(/\.mov$/);
   });
 
+  it('rejects a bare "wide" atom followed by HTML (no real moov/mdat atom present)', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeWideAtomFollowedByHtmlBuffer(), { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.mov');
+  });
+
+  it('rejects a "free" atom whose declared size is larger than the file', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeOversizedFreeAtomBuffer(), { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.mov');
+  });
+
+  it('rejects a file whose walked atoms never include a moov/mdat (exhausts the walk limit)', async () => {
+    setupOrderFound();
+    // Four valid-but-uninteresting atoms, no moov/mdat among them.
+    const buf = Buffer.concat([
+      makeAtom('free'), makeAtom('skip'), makeAtom('pnot'), makeAtom('junk'),
+    ]);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', buf, { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.mov');
+  });
+
+  it('accepts a "wide" box prepended to a real mov-style layout (ftyp/moov/mdat)', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeLegacyQuickTimeMovieBuffer(), { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.mov$/);
+  });
+
   it('accepts an MP4 declared video/mp4 whose ftyp brand is "qt  " (classified as quicktime, stored as .mov)', async () => {
     setupOrderFound();
     setupInsertImageEcho(1);
@@ -754,6 +869,17 @@ describe('POST /api/orders/:id/images — content detection overrides a misleadi
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.avif');
+  });
+
+  it('rejects an ftyp box with a 64-bit largesize (size==1) outright, even when it would otherwise be AVIF', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeFtypLargesizeBuffer(), { filename: 'weird.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: weird.mp4');
   });
 
   it('rejects a JPEG over 10MB declared as video/mp4 as an oversized image (detects by content first)', async () => {
@@ -790,5 +916,50 @@ describe('POST /api/orders/:id/images — content detection overrides a misleadi
     const prefix = 'Nội dung tệp không khớp định dạng: ';
     expect(res.body.error.startsWith(prefix)).toBe(true);
     expect(res.body.error.length - prefix.length).toBeLessThanOrEqual(100);
+  });
+
+  it('sanitizeOriginalFilename strips Unicode bidi/format characters (spoofing chars)', () => {
+    // ZWSP, LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI, BOM
+    const dirty =
+      'evil​‌‍‎‏' +
+      '‪‫‬‭‮' +
+      '⁦⁧⁨⁩' +
+      '﻿.jpg';
+    expect(sanitizeOriginalFilename(dirty)).toBe('evil.jpg');
+  });
+
+  it('sanitizeOriginalFilename truncates without splitting a surrogate pair', () => {
+    // 😀 (U+1F600) is a single code point encoded as a UTF-16 surrogate
+    // pair. Place it exactly at the 100-code-point boundary so a naive
+    // UTF-16-based slice(0, 100) would cut it in half and produce an
+    // unpaired (invalid) surrogate.
+    const name = `${'a'.repeat(99)}😀${'b'.repeat(20)}`;
+    const result = sanitizeOriginalFilename(name);
+    expect(Array.from(result)).toHaveLength(100);
+    expect(result).toBe(`${'a'.repeat(99)}😀`);
+    // No lone surrogate half left behind
+    expect(result).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(result).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
+
+  it('returns an error (not a throw) and cleans up when renaming the detected file fails', async () => {
+    setupOrderFound();
+    const renameSpy = jest.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw new Error('simulated rename failure');
+    });
+    try {
+      // A PNG saved with a .jpg extension needs a rename to .png after detection.
+      const res = await request(app)
+        .post('/api/orders/o1/images')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .attach('images', fakePngBuffer(), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe('Không thể xử lý tệp đã tải lên, vui lòng thử lại');
+      expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+    } finally {
+      renameSpy.mockRestore();
+    }
   });
 });
