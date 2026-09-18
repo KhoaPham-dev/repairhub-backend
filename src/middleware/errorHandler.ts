@@ -14,7 +14,7 @@ export function errorHandler(
       res.status(413).json({
         success: false,
         data: null,
-        error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)',
+        error: 'Tệp quá lớn (ảnh tối đa 10MB, video tối đa 100MB)',
       });
       return;
     }

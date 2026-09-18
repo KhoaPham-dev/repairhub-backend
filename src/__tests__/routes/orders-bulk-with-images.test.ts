@@ -63,6 +63,9 @@ const adminToken = jwt.sign(
 
 let tmpDir: string;
 let app: Express;
+// Captured from the SAME isolated registry orders.ts uses, so it is the
+// exact sharp mock singleton the route calls into.
+let sharpMock: jest.Mock;
 
 // Mock client used inside transactions
 const mockClientQuery = jest.fn();
@@ -77,6 +80,8 @@ beforeAll(() => {
     const ordersRouter = require('../../routes/orders').default;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { errorHandler: isolatedErrHandler } = require('../../middleware/errorHandler');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    sharpMock = require('sharp');
     app = express();
     app.use(express.json());
     app.use('/api/orders', ordersRouter);
@@ -429,19 +434,73 @@ describe('POST /api/orders/bulk-with-images — validation (RH-142)', () => {
 
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
-    expect(res.body.error).toMatch(/Định dạng ảnh không hợp lệ/);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
   });
 
-  it('returns 413 when an image exceeds 10MB', async () => {
-    const bigBuf = Buffer.alloc(10 * 1024 * 1024 + 1, 0);
+  it('rejects an unsupported video mimetype (video/x-msvideo) with 4xx', async () => {
+    const aviBuf = Buffer.alloc(100, 0x41);
     const res = await request(app)
       .post('/api/orders/bulk-with-images')
       .set('Authorization', `Bearer ${adminToken}`)
       .field('payload', makePayload())
-      .attach('images_0', bigBuf, { filename: 'huge.jpg', contentType: 'image/jpeg' });
+      .attach('images_0', aviBuf, { filename: 'clip.avi', contentType: 'video/x-msvideo' });
 
-    expect(res.status).toBe(413);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
+  });
+
+  it('rejects an unsupported document mimetype (application/pdf) with 4xx', async () => {
+    const pdfBuf = Buffer.from('%PDF-1.4', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', pdfBuf, { filename: 'doc.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
+  });
+
+  it('returns 400 when an image exceeds 10MB, and cleans up all files from the request', async () => {
+    const bigBuf = Buffer.alloc(12 * 1024 * 1024, 0); // 12MB image
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', bigBuf, { filename: 'huge.jpg', contentType: 'image/jpeg' })
+      .attach('images_0', jpg, { filename: 'small.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/Ảnh quá lớn/);
+    expect(res.body.error).toBe('Ảnh quá lớn (tối đa 10MB mỗi ảnh)');
+    // Every file from the request — including the valid small one — must be cleaned up
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+});
+
+describe('POST /api/orders/bulk-with-images — video uploads (RH-video)', () => {
+  it('accepts an MP4 video, stores it with a .mp4 extension, and does not call sharp', async () => {
+    const order = { id: 'oV', order_code: '20260618-00000', status: 'TIEP_NHAN' };
+    setupSuccessfulTransaction([order], [1]);
+
+    const videoBuf = Buffer.from('fake mp4 bytes');
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', videoBuf, { filename: 'clip.mov.exe', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(201);
+    const imageInsert = mockClientQuery.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('INSERT INTO order_images')
+    );
+    expect(imageInsert).toBeDefined();
+    const storedPath = (imageInsert![1] as unknown[])[1] as string;
+    // Extension must come from the mimetype map, not from the (misleading) originalname
+    expect(storedPath).toMatch(/\.mp4$/);
+    expect(sharpMock).not.toHaveBeenCalled();
   });
 });

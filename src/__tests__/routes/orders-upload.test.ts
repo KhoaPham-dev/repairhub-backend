@@ -68,6 +68,11 @@ let tmpDir: string;
 // same app instance — that is fine because multer config is stateless beyond
 // the upload dir, which doesn't change during the suite.
 let app: Express;
+// The sharp mock instance used by the isolated copy of orders.ts (captured
+// from the SAME isolated registry so it is the exact singleton orders.ts
+// calls into — a top-level `import sharp` would resolve to a different
+// module instance since it lives outside jest.isolateModules).
+let sharpMock: jest.Mock;
 
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rh139-test-'));
@@ -82,6 +87,8 @@ beforeAll(() => {
     const ordersRouter = require('../../routes/orders').default;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { errorHandler: isolatedErrHandler } = require('../../middleware/errorHandler');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    sharpMock = require('sharp');
     app = express();
     app.use(express.json());
     app.use('/api/orders', ordersRouter);
@@ -215,7 +222,7 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/Định dạng ảnh không hợp lệ/);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
   });
 
   it('rejects image/bmp mimetype with 4xx error', async () => {
@@ -230,19 +237,71 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     expect(res.body.success).toBe(false);
   });
 
-  // ── 4. File exceeding 10MB → 413 ─────────────────────────────────────────
-  it('returns 413 when an image exceeds 10MB', async () => {
-    // LIMIT_FILE_SIZE fires during multipart parsing — no order lookup mock needed.
+  it('rejects an unsupported video mimetype (video/x-msvideo) with 4xx error', async () => {
+    const avi = Buffer.alloc(100, 0x41);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', avi, { filename: 'clip.avi', contentType: 'video/x-msvideo' });
 
-    const bigBuffer = oversizeBuffer(10 * 1024 * 1024); // just over 10MB
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
+  });
+
+  it('rejects an unsupported document mimetype (application/pdf) with 4xx error', async () => {
+    const pdf = Buffer.from('%PDF-1.4', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', pdf, { filename: 'doc.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(/Định dạng tệp không hợp lệ/);
+  });
+
+  // ── 4. Oversized IMAGE (>10MB) → 400, files cleaned up (video max is 100MB) ─
+  it('returns 400 when an image exceeds 10MB, and cleans up the file', async () => {
+    setupOrderFound();
+
+    const bigBuffer = oversizeBuffer(12 * 1024 * 1024); // 12MB image
     const res = await request(app)
       .post('/api/orders/o1/images')
       .set('Authorization', `Bearer ${adminToken}`)
       .attach('images', bigBuffer, { filename: 'huge.jpg', contentType: 'image/jpeg' });
 
-    expect(res.status).toBe(413);
+    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/Ảnh quá lớn/);
+    expect(res.body.error).toBe('Ảnh quá lớn (tối đa 10MB mỗi ảnh)');
+    // multer wrote the file to tmpDir; the route must delete it before responding
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  // ── 4b. Video accepted (up to 100MB, images stay capped at 10MB) ─────────
+  it('accepts an MP4 video, stores it with a .mp4 extension, and does not call sharp', async () => {
+    setupOrderFound();
+    mockQuery.mockImplementationOnce((_sql: string, params: unknown[]) => {
+      return Promise.resolve({
+        rows: [{ id: 'img1', image_path: params[1], image_type: 'INTAKE', uploaded_by: 'u1' }],
+      });
+    });
+
+    const videoBuf = Buffer.from('fake mp4 bytes');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('image_type', 'INTAKE')
+      .attach('images', videoBuf, { filename: 'clip.mov.exe', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
+    const storedPath: string = res.body.data[0].image_path;
+    // Extension must come from the mimetype map, not from the (misleading) originalname
+    expect(storedPath).toMatch(/\.mp4$/);
+    expect(sharpMock).not.toHaveBeenCalled();
   });
 
   // ── 5. HEIC conversion (REAL decode) ──────────────────────────────────────

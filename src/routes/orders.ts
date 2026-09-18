@@ -16,44 +16,79 @@ router.use(authenticate);
 const uploadDir = process.env.UPLOAD_DIR || 'uploads';
 fs.mkdirSync(uploadDir, { recursive: true });
 
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm']);
+const ALLOWED_MIME_TYPES = new Set<string>([...ALLOWED_IMAGE_MIME_TYPES, ...ALLOWED_VIDEO_MIME_TYPES]);
+const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
+const VALID_IMAGE_TYPES = new Set(['INTAKE', 'COMPLETION']);
+
+// Stored filename extension is derived from the verified mimetype (never from
+// the client-supplied originalname, which is untrusted and can be spoofed).
+const MIME_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/heic': '.heic',
+  'image/heif': '.heic',
+  'video/mp4': '.mp4',
+  'video/quicktime': '.mov',
+  'video/webm': '.webm',
+};
+
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB — enforced per-file, after multer, image-only
+const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB — multer's single request-wide fileSize cap
+
 const storage = multer.diskStorage({
   destination: uploadDir,
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
+    const ext = MIME_EXTENSIONS[file.mimetype] || '';
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
   },
 });
-const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
-const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
-const VALID_IMAGE_TYPES = new Set(['INTAKE', 'COMPLETION']);
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
-      e.status = 400;
-      cb(e);
-    }
-  },
-});
 
+// Shared multer config factory for all order media uploads (images + video).
+// multer only supports one request-wide fileSize limit, so it is set to the
+// video max (MAX_VIDEO_SIZE); images are individually re-checked against
+// MAX_IMAGE_SIZE after multer has parsed the request (see rejectOversizedImages).
+// `files` lets the warranty-claim route keep its explicit per-request cap
+// while the other two routes stay uncapped — the one real per-route difference.
+function createMediaUpload(options: { files?: number } = {}) {
+  return multer({
+    storage,
+    limits: {
+      fileSize: MAX_VIDEO_SIZE,
+      ...(options.files !== undefined ? { files: options.files } : {}),
+    },
+    fileFilter: (_req, file, cb) => {
+      if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+        cb(null, true);
+      } else {
+        const e = new Error('Định dạng tệp không hợp lệ') as Error & { status?: number };
+        e.status = 400;
+        cb(e);
+      }
+    },
+  });
+}
+
+const upload = createMediaUpload();
 // Warranty claim upload config with explicit file count limit
-const warrantyUpload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
-      e.status = 400;
-      cb(e);
+const warrantyUpload = createMediaUpload({ files: 10 });
+
+// Rejects the whole request (and deletes every file multer already wrote for
+// it) if any IMAGE file exceeds MAX_IMAGE_SIZE. Videos are already bounded by
+// multer's fileSize limit (MAX_VIDEO_SIZE) and are not re-checked here.
+function rejectOversizedImages(files: Express.Multer.File[]): boolean {
+  const hasOversizedImage = files.some(
+    (f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && f.size > MAX_IMAGE_SIZE
+  );
+  if (hasOversizedImage) {
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
     }
-  },
-});
+  }
+  return hasOversizedImage;
+}
 
 const STATUS_FLOW = [
   'TIEP_NHAN', 'DANG_KIEM_TRA', 'BAO_GIA',
@@ -315,10 +350,14 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
     [newOrder.id, req.user!.id, fault_description || null]
   );
 
-  // Process and insert images for this warranty order
+  // Process and insert images/videos for this warranty order
   const files = req.files as Express.Multer.File[] || [];
+  if (rejectOversizedImages(files)) {
+    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
+    return;
+  }
   for (const file of files) {
-    const finalFilename = await storeUploadedImage(file);
+    const finalFilename = await storeUploadedMedia(file);
     await pool.query(
       `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
        VALUES ($1,$2,'INTAKE',$3)`,
@@ -528,16 +567,17 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
     // Compare against real status transitions only. PATCH /:id inserts
     // administrative order_status_history rows (old_status = new_status) for
     // warranty-duration edits (RH-133) and notes-only updates; those must not
-    // bump the "latest change" timestamp, or a completion photo uploaded
+    // bump the "latest change" timestamp, or a COMPLETION photo/video uploaded
     // before such an edit would wrongly stop counting as fresh. Creation
-    // rows (old_status IS NULL) still count via IS DISTINCT FROM.
+    // rows (old_status IS NULL) still count via IS DISTINCT FROM. Videos are
+    // COMPLETION rows too, so this query is unchanged by video support.
     const completionImage = await pool.query(
       `SELECT 1 FROM order_images oi WHERE oi.order_id = $1 AND oi.image_type = 'COMPLETION'
        AND oi.uploaded_at > (SELECT MAX(changed_at) FROM order_status_history WHERE order_id = $1 AND old_status IS DISTINCT FROM new_status) LIMIT 1`,
       [req.params.id]
     );
     if (!completionImage.rows[0]) {
-      res.status(400).json({ success: false, data: null, error: 'Vui lòng tải ảnh khi chuyển sang trạng thái Đã giao / Huỷ trả máy' });
+      res.status(400).json({ success: false, data: null, error: 'Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Đã giao / Huỷ trả máy' });
       return;
     }
   }
@@ -566,13 +606,18 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: updated.rows[0], error: null });
 }));
 
-// ── Shared image-processing helper ───────────────────────────────────────────
+// ── Shared media-processing helper ───────────────────────────────────────────
 // Converts HEIC → JPEG (via heic-convert) and compresses >2MB images (via
-// sharp).  Returns the final stored filename.  On failure the original file
-// is removed before rethrowing so no orphaned file is left on disk.
+// sharp).  Videos pass through unchanged — no sharp or heic-convert.  Returns
+// the final stored filename.  On failure the original file is removed before
+// rethrowing so no orphaned file is left on disk.
 const TWO_MB = 2 * 1024 * 1024;
 
-export async function storeUploadedImage(file: Express.Multer.File): Promise<string> {
+export async function storeUploadedMedia(file: Express.Multer.File): Promise<string> {
+  if (ALLOWED_VIDEO_MIME_TYPES.has(file.mimetype)) {
+    return file.filename;
+  }
+
   const originalPath = path.join(uploadDir, file.filename);
   const isHeic = HEIC_MIME_TYPES.has(file.mimetype);
   let outputPath: string | undefined; // a converted/compressed file we may have started writing
@@ -642,6 +687,11 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
     return;
   }
 
+  if (rejectOversizedImages(files)) {
+    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
+    return;
+  }
+
   const imageType = (req.body.image_type as string) || 'INTAKE';
   if (!VALID_IMAGE_TYPES.has(imageType)) {
     // multer already wrote the files to disk; remove them so a bad request doesn't orphan files.
@@ -655,7 +705,7 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
   const inserted = [];
 
   for (const file of files) {
-    const finalFilename = await storeUploadedImage(file);
+    const finalFilename = await storeUploadedMedia(file);
     const r = await pool.query(
       `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
        VALUES ($1,$2,$3,$4) RETURNING *`,
@@ -676,19 +726,7 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
 
 const VALID_PRODUCT_TYPES = new Set(['SPEAKER', 'HEADPHONE', 'OTHER', 'BAO_HANH']);
 
-const uploadAny = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      const e = new Error('Định dạng ảnh không hợp lệ') as Error & { status?: number };
-      e.status = 400;
-      cb(e);
-    }
-  },
-});
+const uploadAny = createMediaUpload();
 
 router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Request, res: Response) => {
   // ── 1. Parse and validate payload ────────────────────────────────────────
@@ -740,6 +778,10 @@ router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Reque
   // multer .any() puts all files in req.files as Express.Multer.File[] with
   // a .fieldname property. Fields named images_<i> map to product index i.
   const allFiles = (req.files as Express.Multer.File[]) || [];
+  if (rejectOversizedImages(allFiles)) {
+    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
+    return;
+  }
   const filesByProduct = new Map<number, Express.Multer.File[]>();
   for (const file of allFiles) {
     const match = file.fieldname.match(/^images_(\d+)$/);
@@ -780,10 +822,10 @@ router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Reque
         [newOrder.id, req.user!.id]
       );
 
-      // Process and insert images for this product
+      // Process and insert images/videos for this product
       const productFiles = filesByProduct.get(i) || [];
       for (const file of productFiles) {
-        const finalFilename = await storeUploadedImage(file);
+        const finalFilename = await storeUploadedMedia(file);
         writtenFiles.push(path.join(uploadDir, finalFilename));
         await client.query(
           `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)

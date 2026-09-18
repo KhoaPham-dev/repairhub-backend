@@ -769,7 +769,7 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'DA_GIAO', notes: 'Đã giao cho khách' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng tải ảnh khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
     const updateCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
     );
@@ -819,7 +819,7 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'HUY_TRA_MAY', notes: 'Khách huỷ trả máy' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng tải ảnh khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
     const updateCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
     );

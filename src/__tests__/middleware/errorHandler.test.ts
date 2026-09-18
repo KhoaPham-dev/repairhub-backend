@@ -62,7 +62,7 @@ describe('errorHandler middleware', () => {
     const body = json.mock.calls[0][0];
     expect(body.success).toBe(false);
     expect(body.data).toBeNull();
-    expect(body.error).toMatch(/Ảnh quá lớn/);
+    expect(body.error).toMatch(/Tệp quá lớn \(ảnh tối đa 10MB, video tối đa 100MB\)/);
   });
 
   it('returns 400 for any other MulterError code', () => {
