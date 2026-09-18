@@ -183,6 +183,7 @@ describe('GET /api/agent/orders — validation', () => {
     ['limit=abc', 'Invalid limit'],
     ['limit=101', 'Invalid limit'],
     ['limit=-1', 'Invalid limit'],
+    ['limit=0', 'Invalid limit'],
     ['offset=abc', 'Invalid offset'],
     ['offset=-1', 'Invalid offset'],
   ])('returns 400 for %s', async (qs, expectedError) => {
@@ -199,6 +200,16 @@ describe('GET /api/agent/orders — validation', () => {
       .get('/api/agent/orders?date_from=2026-09-01&date_to=2026-09-18&status=SUA_XONG&product_type=SPEAKER&limit=5&offset=10')
       .set('X-Agent-Key', AGENT_KEY);
     expect(res.status).toBe(200);
+  });
+
+  it('accepts limit=1 (the minimum) and offset=0 (the minimum)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] }).mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get('/api/agent/orders?limit=1&offset=0')
+      .set('X-Agent-Key', AGENT_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.data.limit).toBe(1);
+    expect(res.body.data.offset).toBe(0);
   });
 });
 
@@ -294,12 +305,18 @@ describe('GET /api/agent/orders/:idOrCode', () => {
     expect(call[1]).toEqual(['20260918-00007']);
   });
 
-  it('looks up by id OR order_code when :idOrCode is UUID-shaped', async () => {
+  it('looks up by id OR order_code when :idOrCode is UUID-shaped, with an explicit ::uuid cast and separate placeholders', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await request(buildApp()).get(`/api/agent/orders/${UUID}`).set('X-Agent-Key', AGENT_KEY);
     const call = mockQuery.mock.calls[0];
-    expect(call[0]).toContain('WHERE id = $1 OR order_code = $1');
-    expect(call[1]).toEqual([UUID]);
+    // id is a uuid column and order_code is varchar — reusing a single $1
+    // for both sides of the OR fails Postgres's PREPARE/EXECUTE parameter
+    // type unification (one $N can't be both uuid and text). The uuid side
+    // must have an explicit cast, and each side must get its own
+    // placeholder (same JS value passed twice).
+    expect(call[0]).toContain('WHERE id = $1::uuid OR order_code = $2');
+    expect(call[0]).not.toContain('id = $1 OR order_code = $1');
+    expect(call[1]).toEqual([UUID, UUID]);
   });
 
   it('returns 404 "Not found" (English, per contract) when no order matches', async () => {

@@ -208,13 +208,14 @@ async function fetchMediaByOrderIds(orderIds: string[]): Promise<Map<string, Med
 
 // Non-negative integer query param, defaulting to `def` when absent;
 // returns null when present but not a valid non-negative integer, or when
-// it exceeds `max` (when `max` is provided).
-function parseIntParam(raw: unknown, def: number, max?: number): number | null {
+// it falls outside [opts.min, opts.max] (either bound optional).
+function parseIntParam(raw: unknown, def: number, opts: { min?: number; max?: number } = {}): number | null {
   if (raw === undefined) return def;
   const str = Array.isArray(raw) ? raw[0] : raw;
   if (typeof str !== 'string' || !/^\d+$/.test(str)) return null;
   const n = Number(str);
-  if (max !== undefined && n > max) return null;
+  if (opts.min !== undefined && n < opts.min) return null;
+  if (opts.max !== undefined && n > opts.max) return null;
   return n;
 }
 
@@ -239,12 +240,12 @@ router.get('/orders', asyncHandler(async (req: Request, res: Response) => {
     res.status(400).json({ success: false, data: null, error: 'Invalid product_type' });
     return;
   }
-  const limit = parseIntParam(req.query.limit, 20, 100);
+  const limit = parseIntParam(req.query.limit, 20, { min: 1, max: 100 });
   if (limit === null) {
     res.status(400).json({ success: false, data: null, error: 'Invalid limit' });
     return;
   }
-  const offset = parseIntParam(req.query.offset, 0);
+  const offset = parseIntParam(req.query.offset, 0, { min: 0 });
   if (offset === null) {
     res.status(400).json({ success: false, data: null, error: 'Invalid offset' });
     return;
@@ -306,13 +307,19 @@ router.get('/orders/:idOrCode', asyncHandler(async (req: Request, res: Response)
   const { idOrCode } = req.params;
   const isUuid = UUID_RE.test(idOrCode);
 
+  // `id` is a uuid column and `order_code` is varchar — a single $1 reused
+  // for both sides of an OR can't type-unify across the two (Postgres's
+  // PREPARE/EXECUTE parameter typing picks one type for $1 and fails, or
+  // errors, for the other), so the id side needs an explicit ::uuid cast
+  // and the value must be passed once per placeholder ($1 for the uuid
+  // comparison, $2 for the text comparison — same JS value, two params).
   const orderResult = await pool.query<OrderRow>(
     isUuid
       ? `SELECT id, order_code, product_type, device_name, fault_description, status, created_at, updated_at
-         FROM orders WHERE id = $1 OR order_code = $1`
+         FROM orders WHERE id = $1::uuid OR order_code = $2`
       : `SELECT id, order_code, product_type, device_name, fault_description, status, created_at, updated_at
          FROM orders WHERE order_code = $1`,
-    [idOrCode]
+    isUuid ? [idOrCode, idOrCode] : [idOrCode]
   );
   const order = orderResult.rows[0];
   if (!order) {
