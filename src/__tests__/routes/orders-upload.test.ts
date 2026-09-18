@@ -59,6 +59,13 @@ const adminToken = jwt.sign(
   SECRET,
   { expiresIn: '1h' }
 );
+// Not a valid app role (only ADMIN/TECHNICIAN exist) — used only to exercise
+// the route's own role check, since JWT payloads aren't schema-validated.
+const viewerToken = jwt.sign(
+  { id: 'u3', username: 'viewer', role: 'VIEWER', branch_id: null },
+  SECRET,
+  { expiresIn: '1h' }
+);
 
 // Use a temp directory as the uploads dir so tests are fully isolated.
 let tmpDir: string;
@@ -242,6 +249,34 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
     expect(res.body.error).toMatch(/Loại ảnh không hợp lệ/);
+    // Already-written file must be cleaned up, not orphaned.
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('returns 404 for a non-existent order and cleans up the already-written file', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // order not found
+
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/o99/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(404);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('returns 403 for a caller without upload permission and cleans up the already-written file', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u1' }] }); // order exists
+
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .attach('images', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(403);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
   it('returns 400 for unsupported image_type value (OTHER)', async () => {

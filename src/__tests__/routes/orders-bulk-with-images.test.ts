@@ -491,6 +491,104 @@ describe('POST /api/orders/bulk-with-images — validation (RH-142)', () => {
   });
 });
 
+describe('POST /api/orders/bulk-with-images — payload validation cleans up attached files', () => {
+  // All of these validation checks run AFTER multer has already written any
+  // attached file to disk (uploadAny.any() parses the whole multipart
+  // request first) and BEFORE the transaction starts — each must delete the
+  // file rather than leaving it orphaned.
+
+  it('cleans up the attached file for invalid JSON payload', async () => {
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', '{not valid json}')
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when customer_id/branch_id is missing', async () => {
+    const payload = JSON.stringify({
+      branch_id: 'b1',
+      products: [{ product_type: 'SPEAKER', device_name: 'JBL', fault_description: 'x' }],
+    });
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload)
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when products array is empty', async () => {
+    const payload = JSON.stringify({ customer_id: 'c1', branch_id: 'b1', products: [] });
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload)
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when more than 20 products are submitted', async () => {
+    const products = Array.from({ length: 21 }, (_, i) => ({
+      product_type: 'SPEAKER', device_name: `dev${i}`, fault_description: 'loi',
+    }));
+    const payload = JSON.stringify({ customer_id: 'c1', branch_id: 'b1', products });
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload)
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when a product has an invalid product_type', async () => {
+    const payload = JSON.stringify({
+      customer_id: 'c1',
+      branch_id: 'b1',
+      products: [{ product_type: 'INVALID_TYPE', device_name: 'JBL', fault_description: 'x' }],
+    });
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload)
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when a product is missing device_name/fault_description', async () => {
+    const payload = JSON.stringify({
+      customer_id: 'c1',
+      branch_id: 'b1',
+      products: [{ product_type: 'SPEAKER', fault_description: 'x' }],
+    });
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', payload)
+      .attach('images_0', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+});
+
 describe('POST /api/orders/bulk-with-images — video uploads (RH-video)', () => {
   it('accepts an MP4 video, stores it with a .mp4 extension, and does not call sharp', async () => {
     const order = { id: 'oV', order_code: '20260618-00000', status: 'TIEP_NHAN' };

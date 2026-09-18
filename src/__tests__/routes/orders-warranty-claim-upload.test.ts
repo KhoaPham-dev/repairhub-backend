@@ -294,4 +294,55 @@ describe('POST /api/orders/warranty-claim — transaction (no orphan order on fa
     // The file written for the image must be cleaned up — no orphan on disk.
     expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
+
+  it('cleans up the attached file when branch_id is missing (400 before any DB call)', async () => {
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('source_order_id', 'o1')
+      // branch_id omitted
+      .attach('images', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Thiếu thông tin bắt buộc');
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when the source order is not found (404)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // source order not found
+
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('source_order_id', 'o-nonexistent')
+      .field('branch_id', 'b1')
+      .attach('images', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(404);
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('cleans up the attached file when the source order is itself a warranty order (400)', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ ...sourceOrder, id: 'bh1', order_code: 'ORD-20260425-00001-BH', product_type: 'BAO_HANH' }],
+    });
+
+    const jpg = tinyJpegBuffer();
+    const res = await request(app)
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('source_order_id', 'bh1')
+      .field('branch_id', 'b1')
+      .attach('images', jpg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/đơn bảo hành/);
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
 });

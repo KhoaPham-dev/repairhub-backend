@@ -9,6 +9,7 @@ import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
 import { asyncHandler } from '../utils/asyncHandler';
+import { deleteUploadedFiles, discardUploadedFiles } from '../utils/uploadCleanup';
 
 const router = Router();
 router.use(authenticate);
@@ -82,14 +83,6 @@ function createMediaUpload(options: { files: number }) {
 const upload = createMediaUpload({ files: IMAGES_MAX_FILES });
 const warrantyUpload = createMediaUpload({ files: WARRANTY_MAX_FILES });
 
-// Deletes every file multer wrote to disk for this request. Used whenever
-// post-multer validation rejects the request, so nothing is orphaned.
-function deleteFiles(files: Express.Multer.File[]): void {
-  for (const f of files) {
-    try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
-  }
-}
-
 // Reads up to the first 32 bytes of a file already written to disk by multer.
 function readFileHeader(filePath: string): Buffer {
   try {
@@ -148,14 +141,14 @@ function fileSignatureMatches(header: Buffer, mimetype: string): boolean {
 function validateUploadedFiles(files: Express.Multer.File[]): string | null {
   for (const f of files) {
     if (ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && f.size > MAX_IMAGE_SIZE) {
-      deleteFiles(files);
+      deleteUploadedFiles(files);
       return OVERSIZED_IMAGE_MESSAGE;
     }
   }
   for (const f of files) {
     const header = readFileHeader(path.join(uploadDir, f.filename));
     if (!fileSignatureMatches(header, f.mimetype)) {
-      deleteFiles(files);
+      deleteUploadedFiles(files);
       return INVALID_FILE_CONTENT_MESSAGE;
     }
   }
@@ -368,6 +361,7 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
   };
 
   if (!source_order_id || !branch_id) {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'Thiếu thông tin bắt buộc' });
     return;
   }
@@ -384,6 +378,7 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
   // Load source order
   const src = await pool.query('SELECT * FROM orders WHERE id = $1', [source_order_id]);
   if (!src.rows[0]) {
+    discardUploadedFiles(req);
     res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn gốc' });
     return;
   }
@@ -392,6 +387,7 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
 
   // A warranty order cannot itself be the source of another warranty claim.
   if (sourceOrder.product_type === 'BAO_HANH' || WARRANTY_CODE_SUFFIX_RE.test(sourceOrder.order_code)) {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'Không thể tạo bảo hành cho đơn bảo hành' });
     return;
   }
@@ -776,12 +772,14 @@ export async function storeUploadedMedia(file: Express.Multer.File): Promise<str
 router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Request, res: Response) => {
   const orderCheck = await pool.query('SELECT created_by FROM orders WHERE id = $1', [req.params.id]);
   if (!orderCheck.rows[0]) {
+    discardUploadedFiles(req);
     res.status(404).json({ success: false, data: null, error: 'Không tìm thấy đơn hàng' });
     return;
   }
   const isTechnician = req.user!.role === 'TECHNICIAN';
   const isAdmin = req.user!.role === 'ADMIN';
   if (!isAdmin && !isTechnician) {
+    discardUploadedFiles(req);
     res.status(403).json({ success: false, data: null, error: 'Không có quyền tải ảnh cho đơn này' });
     return;
   }
@@ -801,9 +799,7 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
   const imageType = (req.body.image_type as string) || 'INTAKE';
   if (!VALID_IMAGE_TYPES.has(imageType)) {
     // multer already wrote the files to disk; remove them so a bad request doesn't orphan files.
-    for (const f of files) {
-      try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
-    }
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'Loại ảnh không hợp lệ' });
     return;
   }
@@ -851,30 +847,36 @@ router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Reque
   try {
     payload = JSON.parse(req.body.payload as string);
   } catch {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'payload phải là JSON hợp lệ' });
     return;
   }
 
   const { customer_id, branch_id, products } = payload;
   if (!customer_id || !branch_id) {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'Thiếu customer_id hoặc branch_id' });
     return;
   }
   if (!Array.isArray(products) || products.length === 0) {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'products phải là mảng không rỗng' });
     return;
   }
   if (products.length > 20) {
+    discardUploadedFiles(req);
     res.status(400).json({ success: false, data: null, error: 'Tối đa 20 sản phẩm mỗi lần tạo' });
     return;
   }
   for (let i = 0; i < products.length; i++) {
     const p = products[i];
     if (!VALID_PRODUCT_TYPES.has(p.product_type)) {
+      discardUploadedFiles(req);
       res.status(400).json({ success: false, data: null, error: `Sản phẩm ${i}: product_type không hợp lệ (${p.product_type})` });
       return;
     }
     if (!p.device_name || !p.fault_description) {
+      discardUploadedFiles(req);
       res.status(400).json({ success: false, data: null, error: `Sản phẩm ${i}: thiếu device_name hoặc fault_description` });
       return;
     }

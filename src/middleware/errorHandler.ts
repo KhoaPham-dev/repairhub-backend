@@ -1,29 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import path from 'path';
-import fs from 'fs';
 import multer from 'multer';
-
-const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-
-// Deletes every file multer already wrote to disk for this request. multer
-// does not do this itself when a later file in the same multipart request
-// trips a limit (e.g. LIMIT_FILE_SIZE / LIMIT_FILE_COUNT) — without this,
-// the sibling files that were already parsed successfully leak on disk.
-function cleanupUploadedFiles(req: Request): void {
-  const files: Express.Multer.File[] = [];
-  if (Array.isArray(req.files)) {
-    files.push(...req.files);
-  } else if (req.files && typeof req.files === 'object') {
-    for (const fieldFiles of Object.values(req.files)) {
-      files.push(...(fieldFiles as Express.Multer.File[]));
-    }
-  }
-  if (req.file) files.push(req.file);
-
-  for (const f of files) {
-    try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone / never written */ }
-  }
-}
+import { discardUploadedFiles } from '../utils/uploadCleanup';
 
 export function errorHandler(
   err: Error & { status?: number },
@@ -34,7 +11,11 @@ export function errorHandler(
   console.error(err.stack);
 
   if (err instanceof multer.MulterError) {
-    cleanupUploadedFiles(req);
+    // multer does not clean up sibling files itself when a later file in the
+    // same multipart request trips a limit (e.g. LIMIT_FILE_SIZE /
+    // LIMIT_FILE_COUNT) — without this, files already parsed successfully
+    // leak on disk.
+    discardUploadedFiles(req);
 
     if (err.code === 'LIMIT_FILE_SIZE') {
       res.status(413).json({
