@@ -83,13 +83,17 @@ function createMediaUpload(options: { files: number }) {
 const upload = createMediaUpload({ files: IMAGES_MAX_FILES });
 const warrantyUpload = createMediaUpload({ files: WARRANTY_MAX_FILES });
 
-// Reads up to the first 32 bytes of a file already written to disk by multer.
+// Reads up to the first 64 bytes of a file already written to disk by
+// multer — enough for a JPEG/PNG/WebP/WebM signature, or an ISO-BMFF ftyp
+// box's major brand plus several compatible brands (each brand is 4 bytes,
+// starting at offset 16).
+const HEADER_READ_BYTES = 64;
 function readFileHeader(filePath: string): Buffer {
   try {
     const fd = fs.openSync(filePath, 'r');
     try {
-      const header = Buffer.alloc(32);
-      const bytesRead = fs.readSync(fd, header, 0, 32, 0);
+      const header = Buffer.alloc(HEADER_READ_BYTES);
+      const bytesRead = fs.readSync(fd, header, 0, HEADER_READ_BYTES, 0);
       return header.subarray(0, bytesRead);
     } finally {
       fs.closeSync(fd);
@@ -99,58 +103,115 @@ function readFileHeader(filePath: string): Buffer {
   }
 }
 
-// Verifies a file's magic-byte signature matches its declared (and
-// fileFilter-approved) mimetype, so a spoofed Content-Type can't sneak an
-// arbitrary payload past the extension/mimetype checks.
-function fileSignatureMatches(header: Buffer, mimetype: string): boolean {
-  switch (mimetype) {
-    case 'image/jpeg':
-      return header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
-    case 'image/png':
-      return header.length >= 8 &&
-        header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47 &&
-        header[4] === 0x0d && header[5] === 0x0a && header[6] === 0x1a && header[7] === 0x0a;
-    case 'image/webp':
-      return header.length >= 12 &&
-        header.toString('ascii', 0, 4) === 'RIFF' &&
-        header.toString('ascii', 8, 12) === 'WEBP';
-    case 'image/heic':
-    case 'image/heif': {
-      if (header.length < 12 || header.toString('ascii', 4, 8) !== 'ftyp') return false;
-      const brand = header.toString('ascii', 8, 12).toLowerCase();
-      return ['heic', 'heix', 'mif1', 'msf1', 'hevc'].includes(brand);
-    }
-    case 'video/mp4':
-    case 'video/quicktime':
-      // MP4/MOV brand variety is wide (isom, mp42, qt  , M4V , ...) — any
-      // ftyp box at offset 4 is accepted.
-      return header.length >= 8 && header.toString('ascii', 4, 8) === 'ftyp';
-    case 'video/webm':
-      return header.length >= 4 &&
-        header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3;
-    default:
-      return false;
+const HEIC_ISOBMFF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1']);
+const QUICKTIME_LEGACY_ATOMS = new Set(['wide', 'mdat', 'moov', 'free', 'skip', 'pnot']);
+
+// Reads the ISO-BMFF ftyp box's major brand plus its compatible brands
+// (4 bytes each, from offset 16 up to the box's own declared size or the
+// end of the header we have on hand — whichever is smaller).
+function readIsoBmffBrands(header: Buffer): string[] {
+  const majorBrand = header.length >= 12 ? header.toString('ascii', 8, 12) : '';
+  const brands = [majorBrand];
+  const boxSize = header.length >= 4 ? header.readUInt32BE(0) : 0;
+  const end = Math.min(header.length, boxSize > 0 ? boxSize : header.length);
+  for (let offset = 16; offset + 4 <= end; offset += 4) {
+    brands.push(header.toString('ascii', offset, offset + 4));
   }
+  return brands.map((b) => b.toLowerCase());
 }
 
-// Runs ALL post-multer file validation (size, then magic-byte signature)
-// before any DB write. On the first failure, deletes every file already
-// written for this request and returns the error message to send; returns
-// null when every file passes. Videos are already bounded by multer's
-// fileSize limit (MAX_VIDEO_SIZE) and are not size-checked here.
+// Detects the real media type from magic bytes / ISO-BMFF box structure,
+// independent of the declared mimetype. Browsers set Content-Type from the
+// file EXTENSION, not the content — real-world photos/videos routinely have
+// the "wrong" extension (a PNG/WebP/HEIC saved as .jpg by a messaging app,
+// or a legacy QuickTime .mov with no leading ftyp box). Returns one of the
+// allowed mimetypes, or null if the content doesn't match any of them.
+function detectMediaType(header: Buffer): string | null {
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (header.length >= 8 &&
+      header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47 &&
+      header[4] === 0x0d && header[5] === 0x0a && header[6] === 0x1a && header[7] === 0x0a) {
+    return 'image/png';
+  }
+  if (header.length >= 12 &&
+      header.toString('ascii', 0, 4) === 'RIFF' &&
+      header.toString('ascii', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  if (header.length >= 4 &&
+      header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3) {
+    return 'video/webm';
+  }
+
+  if (header.length >= 8) {
+    const atomType = header.toString('ascii', 4, 8);
+    if (atomType === 'ftyp') {
+      const majorBrand = header.length >= 12 ? header.toString('ascii', 8, 12).toLowerCase() : '';
+      // mif1/msf1 are shared with AVIF, which isn't an allowed type — the
+      // major brand (not a compatible brand) is what actually identifies a
+      // file as AVIF, so exclude on that alone.
+      if (majorBrand === 'avif' || majorBrand === 'avis') return null;
+      const brands = readIsoBmffBrands(header);
+      if (brands.some((b) => HEIC_ISOBMFF_BRANDS.has(b))) return 'image/heic';
+      if (majorBrand === 'qt  ') return 'video/quicktime';
+      // Any other ftyp brand (isom, mp41, mp42, avc1, M4V , 3gp*, dash, ...)
+      return 'video/mp4';
+    }
+    // Legacy QuickTime .mov files can lead with a non-ftyp top-level atom.
+    if (QUICKTIME_LEGACY_ATOMS.has(atomType)) {
+      return 'video/quicktime';
+    }
+  }
+
+  return null;
+}
+
+// Strips control characters and caps the length before an
+// attacker-controlled originalname is echoed back to the client.
+export function sanitizeOriginalFilename(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const stripped = (name || '').replace(/[\x00-\x1f\x7f]/g, '');
+  return stripped.length > 100 ? stripped.slice(0, 100) : stripped;
+}
+
+// Runs ALL post-multer file validation before any DB write: detects the
+// real media type of each file from its content (see detectMediaType), then
+// applies the size rule using the DETECTED kind (not the declared
+// mimetype) — order matters, e.g. a large file declared video/mp4 whose
+// content is actually a JPEG must be rejected as an oversized image, not
+// waved through as an (unlimited-size) video. When the detected type's
+// extension differs from what multer wrote initially (because the
+// declared mimetype was wrong), the file is renamed on disk and
+// file.filename/file.mimetype are updated in place so every downstream
+// consumer (storeUploadedMedia, the DB insert) uses the verified type.
+// On the first failure, deletes every file already written for this
+// request and returns the error message to send; returns null when every
+// file passes. Videos are already bounded by multer's fileSize limit
+// (MAX_VIDEO_SIZE) and are not size-checked here.
 function validateUploadedFiles(files: Express.Multer.File[]): string | null {
   for (const f of files) {
-    if (ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && f.size > MAX_IMAGE_SIZE) {
+    const header = readFileHeader(path.join(uploadDir, f.filename));
+    const detectedType = detectMediaType(header);
+    if (!detectedType) {
+      deleteUploadedFiles(files);
+      return `${INVALID_FILE_CONTENT_MESSAGE}: ${sanitizeOriginalFilename(f.originalname)}`;
+    }
+
+    if (ALLOWED_IMAGE_MIME_TYPES.has(detectedType) && f.size > MAX_IMAGE_SIZE) {
       deleteUploadedFiles(files);
       return OVERSIZED_IMAGE_MESSAGE;
     }
-  }
-  for (const f of files) {
-    const header = readFileHeader(path.join(uploadDir, f.filename));
-    if (!fileSignatureMatches(header, f.mimetype)) {
-      deleteUploadedFiles(files);
-      return INVALID_FILE_CONTENT_MESSAGE;
+
+    const detectedExt = MIME_EXTENSIONS[detectedType];
+    const currentExt = path.extname(f.filename);
+    if (detectedExt && detectedExt !== currentExt) {
+      const newFilename = `${path.basename(f.filename, currentExt)}${detectedExt}`;
+      fs.renameSync(path.join(uploadDir, f.filename), path.join(uploadDir, newFilename));
+      f.filename = newFilename;
     }
+    f.mimetype = detectedType;
   }
   return null;
 }
@@ -709,9 +770,15 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
 
 // ── Shared media-processing helper ───────────────────────────────────────────
 // Converts HEIC → JPEG (via heic-convert) and compresses >2MB images (via
-// sharp).  Videos pass through unchanged — no sharp or heic-convert.  Returns
+// sharp, preserving the image's own format — PNG stays PNG, WebP stays
+// WebP).  Videos pass through unchanged — no sharp or heic-convert.  Returns
 // the final stored filename.  On failure the original file is removed before
 // rethrowing so no orphaned file is left on disk.
+//
+// Callers must pass a `file` whose mimetype/filename reflect the CONTENT-
+// DETECTED type (see validateUploadedFiles), not necessarily the client's
+// declared mimetype — a mismatched extension here would compress the wrong
+// format or misclassify a video as an image.
 const TWO_MB = 2 * 1024 * 1024;
 
 export async function storeUploadedMedia(file: Express.Multer.File): Promise<string> {
@@ -746,14 +813,21 @@ export async function storeUploadedMedia(file: Express.Multer.File): Promise<str
       fs.unlinkSync(originalPath); // remove original HEIC
       return jpegName;
     } else if (file.size > TWO_MB) {
-      // Resize and compress large non-HEIC images; output as JPEG
+      // Resize and compress large images, preserving their own format so a
+      // PNG/WebP doesn't silently turn into a (lossy) JPEG.
+      const ext = MIME_EXTENSIONS[file.mimetype] || '.jpg';
       const baseName = path.basename(file.filename, path.extname(file.filename));
-      const compressedName = `c-${baseName}.jpg`;
+      const compressedName = `c-${baseName}${ext}`;
       outputPath = path.join(uploadDir, compressedName);
-      await sharp(originalPath)
-        .resize({ width: 1920, withoutEnlargement: true })
-        .jpeg({ quality: 75 })
-        .toFile(outputPath);
+      let pipeline = sharp(originalPath).resize({ width: 1920, withoutEnlargement: true });
+      if (file.mimetype === 'image/png') {
+        pipeline = pipeline.png({ quality: 75 });
+      } else if (file.mimetype === 'image/webp') {
+        pipeline = pipeline.webp({ quality: 75 });
+      } else {
+        pipeline = pipeline.jpeg({ quality: 75 });
+      }
+      await pipeline.toFile(outputPath);
       fs.unlinkSync(originalPath); // remove original
       return compressedName;
     }

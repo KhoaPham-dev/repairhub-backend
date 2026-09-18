@@ -32,6 +32,8 @@ jest.mock('sharp', () => {
   const fn = jest.fn(() => ({
     resize: jest.fn().mockReturnThis(),
     jpeg: jest.fn().mockReturnThis(),
+    png: jest.fn().mockReturnThis(),
+    webp: jest.fn().mockReturnThis(),
     toFile: jest.fn().mockResolvedValue(undefined),
   }));
   return fn;
@@ -129,6 +131,42 @@ function fakeMp4Buffer(): Buffer {
   ]);
 }
 
+/**
+ * A 12MB buffer that still starts with a valid JPEG signature (FF D8 FF),
+ * so content-detection succeeds and the request is rejected by the size
+ * rule rather than the content-mismatch check.
+ */
+function oversizeJpegBuffer(): Buffer {
+  const buf = Buffer.alloc(12 * 1024 * 1024, 0);
+  buf[0] = 0xff;
+  buf[1] = 0xd8;
+  buf[2] = 0xff;
+  return buf;
+}
+
+/** Minimal buffer with a valid PNG signature. */
+function fakePngBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  ]);
+}
+
+/**
+ * An ISO-BMFF ftyp box whose major brand is 'avif', with 'mif1' as a
+ * compatible brand — mif1/msf1 alone would look like HEIC, but the major
+ * brand must take priority and exclude it as AVIF (not an allowed type).
+ */
+function fakeAvifBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftyp', 'ascii'),
+    Buffer.from('avif', 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    Buffer.from('mif1', 'ascii'),
+  ]);
+}
+
 const sourceOrder = {
   id: 'o1', order_code: 'ORD-20260425-00001', product_type: 'SPEAKER',
   customer_id: 'c1', device_name: 'JBL Flip 6',
@@ -182,6 +220,39 @@ describe('POST /api/orders/warranty-claim — media uploads', () => {
     expect(mockClientRelease).toHaveBeenCalled();
   });
 
+  it('accepts a PNG saved with a .jpg extension (declared image/jpeg) and stores it as .png', async () => {
+    setupSourceOrderFound();
+    setupSuccessfulTransaction();
+
+    const res = await request(app)
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('source_order_id', 'o1')
+      .field('branch_id', 'b1')
+      .attach('images', fakePngBuffer(), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const insertCall = mockClientQuery.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('INSERT INTO order_images')
+    );
+    expect(insertCall).toBeDefined();
+    const storedPath = insertCall![1][1] as string;
+    expect(storedPath).toMatch(/\.png$/);
+  });
+
+  it('rejects an AVIF file (ftyp brand avif) even though mif1/msf1 overlap with HEIC', async () => {
+    const res = await request(app)
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('source_order_id', 'o1')
+      .field('branch_id', 'b1')
+      .attach('images', fakeAvifBuffer(), { filename: 'photo.avif', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.avif');
+    expect(mockConnect).not.toHaveBeenCalled();
+  });
+
   it('rejects an unsupported mimetype (video/x-msvideo) with 4xx (fileFilter)', async () => {
     const aviBuf = Buffer.alloc(100, 0x41);
     const res = await request(app)
@@ -210,12 +281,12 @@ describe('POST /api/orders/warranty-claim — media uploads', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: fake.mp4');
     expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
   it('returns 400 when an image exceeds 10MB, and cleans up the file', async () => {
-    const bigBuf = Buffer.alloc(12 * 1024 * 1024, 0); // 12MB image
+    const bigBuf = oversizeJpegBuffer();
     const res = await request(app)
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -232,7 +303,7 @@ describe('POST /api/orders/warranty-claim — media uploads', () => {
 
 describe('POST /api/orders/warranty-claim — transaction (no orphan order on failure)', () => {
   it('rejects an oversized image before touching the DB at all', async () => {
-    const bigBuf = Buffer.alloc(12 * 1024 * 1024, 0); // 12MB image
+    const bigBuf = oversizeJpegBuffer();
 
     const res = await request(app)
       .post('/api/orders/warranty-claim')

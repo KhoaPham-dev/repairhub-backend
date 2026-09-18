@@ -34,6 +34,8 @@ jest.mock('sharp', () => {
   const fn = jest.fn(() => ({
     resize: jest.fn().mockReturnThis(),
     jpeg: jest.fn().mockReturnThis(),
+    png: jest.fn().mockReturnThis(),
+    webp: jest.fn().mockReturnThis(),
     toFile: jest.fn().mockResolvedValue(undefined),
   }));
   return fn;
@@ -141,6 +143,29 @@ function fakeMp4Buffer(): Buffer {
     Buffer.from('ftypmp42', 'ascii'),
     Buffer.from([0x00, 0x00, 0x00, 0x00]),
     Buffer.from('mp42isom', 'ascii'),
+  ]);
+}
+
+/** Minimal buffer with a valid PNG signature. */
+function fakePngBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  ]);
+}
+
+/**
+ * An ISO-BMFF ftyp box whose major brand is 'avif', with 'mif1' as a
+ * compatible brand — mif1/msf1 alone would look like HEIC, but the major
+ * brand must take priority and exclude it as AVIF (not an allowed type).
+ */
+function fakeAvifBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftyp', 'ascii'),
+    Buffer.from('avif', 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    Buffer.from('mif1', 'ascii'),
   ]);
 }
 
@@ -475,6 +500,7 @@ describe('POST /api/orders/bulk-with-images — validation (RH-142)', () => {
 
   it('returns 400 when an image exceeds 10MB, and cleans up all files from the request', async () => {
     const bigBuf = Buffer.alloc(12 * 1024 * 1024, 0); // 12MB image
+    bigBuf[0] = 0xff; bigBuf[1] = 0xd8; bigBuf[2] = 0xff; // valid JPEG signature, still oversized
     const jpg = tinyJpegBuffer();
     const res = await request(app)
       .post('/api/orders/bulk-with-images')
@@ -622,8 +648,39 @@ describe('POST /api/orders/bulk-with-images — video uploads (RH-video)', () =>
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: video.mp4');
     expect(mockConnect).not.toHaveBeenCalled();
     expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('accepts a PNG saved with a .jpg extension (declared image/jpeg) and stores it as .png', async () => {
+    const order = { id: 'oP', order_code: '20260618-00000', status: 'TIEP_NHAN' };
+    setupSuccessfulTransaction([order], [1]);
+
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', fakePngBuffer(), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const imageInsert = mockClientQuery.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('INSERT INTO order_images')
+    );
+    expect(imageInsert).toBeDefined();
+    const storedPath = (imageInsert![1] as unknown[])[1] as string;
+    expect(storedPath).toMatch(/\.png$/);
+  });
+
+  it('rejects an AVIF file (ftyp brand avif) even though mif1/msf1 overlap with HEIC', async () => {
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', fakeAvifBuffer(), { filename: 'photo.avif', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.avif');
+    expect(mockConnect).not.toHaveBeenCalled();
   });
 });

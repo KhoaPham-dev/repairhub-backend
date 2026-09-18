@@ -33,6 +33,8 @@ jest.mock('sharp', () => {
   const fn = jest.fn(() => ({
     resize: jest.fn().mockReturnThis(),
     jpeg: jest.fn().mockReturnThis(),
+    png: jest.fn().mockReturnThis(),
+    webp: jest.fn().mockReturnThis(),
     toFile: jest.fn().mockResolvedValue(undefined),
   }));
   return fn;
@@ -80,6 +82,10 @@ let app: Express;
 // calls into — a top-level `import sharp` would resolve to a different
 // module instance since it lives outside jest.isolateModules).
 let sharpMock: jest.Mock;
+// Captured from the same isolated registry so it's the exact function
+// orders.ts uses internally (a plain top-level import would trigger a
+// second, un-isolated load of orders.ts using the default UPLOAD_DIR).
+let sanitizeOriginalFilename: (name: string) => string;
 
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rh139-test-'));
@@ -91,7 +97,9 @@ beforeAll(() => {
   // instance — critical for `err instanceof multer.MulterError` to work.
   jest.isolateModules(() => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const ordersRouter = require('../../routes/orders').default;
+    const ordersModule = require('../../routes/orders');
+    const ordersRouter = ordersModule.default;
+    sanitizeOriginalFilename = ordersModule.sanitizeOriginalFilename;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { errorHandler: isolatedErrHandler } = require('../../middleware/errorHandler');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -137,9 +145,17 @@ function tinyJpegBuffer(): Buffer {
   );
 }
 
-/** Build a buffer of at least `bytes` length filled with zeros (for size-limit tests). */
+/**
+ * Build a buffer of at least `bytes` length that still starts with a valid
+ * JPEG signature (FF D8 FF), so content-detection succeeds and the request
+ * is rejected by the size rule rather than the content-mismatch check.
+ */
 function oversizeBuffer(bytes: number): Buffer {
-  return Buffer.alloc(bytes + 1, 0);
+  const buf = Buffer.alloc(bytes + 1, 0);
+  buf[0] = 0xff;
+  buf[1] = 0xd8;
+  buf[2] = 0xff;
+  return buf;
 }
 
 /** Minimal buffer with a valid MP4/MOV ftyp box signature (bytes 4-7 = 'ftyp'). */
@@ -174,6 +190,44 @@ function fakeWebmBuffer(): Buffer {
   return Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00]);
 }
 
+/**
+ * A legacy QuickTime .mov top-level atom with no leading ftyp box — the
+ * box-size + 4-char atom type (wide/mdat/moov/free/skip/pnot) at offset 4.
+ */
+function fakeQuickTimeLegacyBuffer(atomType: string): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x08]),
+    Buffer.from(atomType.padEnd(4, ' '), 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  ]);
+}
+
+/** An ISO-BMFF ftyp box whose major brand is 'qt  ' (QuickTime). */
+function fakeQtBrandBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x14]),
+    Buffer.from('ftyp', 'ascii'),
+    Buffer.from('qt  ', 'ascii'), // major brand
+    Buffer.from([0x00, 0x00, 0x00, 0x00]), // minor version
+    Buffer.from('qt  ', 'ascii'), // compatible brand
+  ]);
+}
+
+/**
+ * An ISO-BMFF ftyp box whose major brand is 'avif', with 'mif1' as a
+ * compatible brand — mif1/msf1 alone would look like HEIC, but the major
+ * brand must take priority and exclude it as AVIF (not an allowed type).
+ */
+function fakeAvifBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftyp', 'ascii'),
+    Buffer.from('avif', 'ascii'), // major brand
+    Buffer.from([0x00, 0x00, 0x00, 0x00]), // minor version
+    Buffer.from('mif1', 'ascii'), // compatible brand
+  ]);
+}
+
 // Setup order-found mock so auth and order lookup succeed for all upload tests
 function setupOrderFound() {
   mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u1' }] }); // order exists
@@ -183,6 +237,19 @@ function setupInsertImage(n = 1) {
   for (let i = 0; i < n; i++) {
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: `img${i}`, image_path: `f${i}.jpg`, image_type: 'INTAKE', uploaded_by: 'u1' }],
+    });
+  }
+}
+
+// Like setupInsertImage, but echoes back the REAL image_path/image_type the
+// route passed to the INSERT — needed whenever a test asserts on the actual
+// stored filename/extension (setupInsertImage's path is a fixed stub).
+function setupInsertImageEcho(n = 1) {
+  for (let i = 0; i < n; i++) {
+    mockQuery.mockImplementationOnce((_sql: string, params: unknown[]) => {
+      return Promise.resolve({
+        rows: [{ id: `img${i}`, image_path: params[1], image_type: params[2], uploaded_by: params[3] }],
+      });
     });
   }
 }
@@ -405,7 +472,7 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: fake.mp4');
     expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
@@ -418,7 +485,7 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
       .attach('images', notAJpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.jpg');
     expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
@@ -529,7 +596,7 @@ describe('POST /api/orders/:id/images — magic-byte signature check', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .attach('images', Buffer.from('not a png'), { filename: 'photo.png', contentType: 'image/png' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.png');
   });
 
   it('rejects a WebP-declared file whose content does not match', async () => {
@@ -539,7 +606,7 @@ describe('POST /api/orders/:id/images — magic-byte signature check', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .attach('images', Buffer.from('not a webp'), { filename: 'photo.webp', contentType: 'image/webp' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.webp');
   });
 
   it('rejects a WebM-declared file whose content does not match', async () => {
@@ -549,7 +616,7 @@ describe('POST /api/orders/:id/images — magic-byte signature check', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .attach('images', Buffer.from('not webm'), { filename: 'clip.webm', contentType: 'video/webm' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: clip.webm');
   });
 
   it('rejects an HTML payload declared as video/mp4', async () => {
@@ -560,6 +627,168 @@ describe('POST /api/orders/:id/images — magic-byte signature check', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .attach('images', htmlBuf, { filename: 'video.mp4', contentType: 'video/mp4' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: video.mp4');
+  });
+});
+
+// ── Content detection (declared mimetype can lie — RH-video-fix) ────────────
+// Browsers set Content-Type from the file EXTENSION, not the content, so
+// real-world photos/videos routinely arrive with a "wrong" extension (a
+// PNG/WebP/HEIC saved as .jpg by a messaging app, or a legacy QuickTime .mov
+// with no leading ftyp box). The server must classify by CONTENT and store
+// under the correct extension, not reject these as a content mismatch.
+describe('POST /api/orders/:id/images — content detection overrides a misleading declared mimetype', () => {
+  it('accepts a PNG saved with a .jpg extension (declared image/jpeg) and stores it as .png', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakePngBuffer(), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.png$/);
+  });
+
+  it('compresses an oversized PNG (declared image/jpeg) with sharp .png(), keeping the .png extension', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    // >2MB (triggers compression) but comfortably under the 10MB image cap.
+    const bigPng = Buffer.concat([fakePngBuffer(), Buffer.alloc(3 * 1024 * 1024, 0)]);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', bigPng, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.png$/);
+    expect(sharpMock).toHaveBeenCalled();
+    const sharpChain = sharpMock.mock.results[sharpMock.mock.results.length - 1].value;
+    expect(sharpChain.png).toHaveBeenCalled();
+    expect(sharpChain.jpeg).not.toHaveBeenCalled();
+  });
+
+  it('accepts a HEIC saved with a .jpg extension (declared image/jpeg) and converts it via heic-convert', async () => {
+    const fixturePath = path.join(__dirname, '../fixtures/tiny.heic');
+    const heicBuf = fs.readFileSync(fixturePath);
+
+    setupOrderFound();
+    mockQuery.mockImplementationOnce((_sql: string, params: unknown[]) => {
+      return Promise.resolve({
+        rows: [{ id: 'img1', image_path: params[1], image_type: 'INTAKE', uploaded_by: 'u1' }],
+      });
+    });
+
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', heicBuf, { filename: 'tiny.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.jpg$/);
+  });
+
+  it('accepts a WebP saved with a .jpg extension (declared image/jpeg) and stores it as .webp', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeWebpBuffer(), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.webp$/);
+  });
+
+  it('accepts a legacy QuickTime .mov with a leading "wide" atom (no ftyp box)', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const movBuf = fakeQuickTimeLegacyBuffer('wide');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', movBuf, { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.mov$/);
+  });
+
+  it.each(['mdat', 'moov', 'free'])('accepts a legacy QuickTime .mov with a leading "%s" atom', async (atom) => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const movBuf = fakeQuickTimeLegacyBuffer(atom);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', movBuf, { filename: 'clip.mov', contentType: 'video/quicktime' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.mov$/);
+  });
+
+  it('accepts an MP4 declared video/mp4 whose ftyp brand is "qt  " (classified as quicktime, stored as .mov)', async () => {
+    setupOrderFound();
+    setupInsertImageEcho(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeQtBrandBuffer(), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(201);
+    const storedPath: string = res.body.data[0].image_path;
+    expect(storedPath).toMatch(/\.mov$/);
+  });
+
+  it('rejects an AVIF file (ftyp brand avif) even though mif1/msf1 overlap with HEIC', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeAvifBuffer(), { filename: 'photo.avif', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng: photo.avif');
+  });
+
+  it('rejects a JPEG over 10MB declared as video/mp4 as an oversized image (detects by content first)', async () => {
+    setupOrderFound();
+    const bigJpeg = oversizeBuffer(10 * 1024 * 1024); // JPEG-signed, >10MB, well under the 100MB video cap
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', bigJpeg, { filename: 'huge.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Ảnh quá lớn (tối đa 10MB mỗi ảnh)');
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  // A raw control character embedded directly in a multipart filename=
+  // parameter is invalid at the HTTP layer (busboy aborts the parse before
+  // our route code ever runs) — so sanitizeOriginalFilename is exercised as
+  // a direct unit test instead of round-tripping through a real upload.
+  it('sanitizeOriginalFilename strips control characters', () => {
+    expect(sanitizeOriginalFilename('evil\x00\x01\x1f.jpg\x7f')).toBe('evil.jpg');
+  });
+
+  it('caps a very long originalname at 100 characters in the error message', async () => {
+    setupOrderFound();
+    const notAJpeg = Buffer.from('not actually a jpeg', 'utf8');
+    const longName = `${'a'.repeat(150)}.jpg`;
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', notAJpeg, { filename: longName, contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    const prefix = 'Nội dung tệp không khớp định dạng: ';
+    expect(res.body.error.startsWith(prefix)).toBe(true);
+    expect(res.body.error.length - prefix.length).toBeLessThanOrEqual(100);
   });
 });

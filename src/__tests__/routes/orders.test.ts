@@ -22,6 +22,8 @@ jest.mock('sharp', () => {
   const sharpMock = jest.fn(() => ({
     resize: jest.fn().mockReturnThis(),
     jpeg: jest.fn().mockReturnThis(),
+    png: jest.fn().mockReturnThis(),
+    webp: jest.fn().mockReturnThis(),
     toFile: jest.fn().mockResolvedValue(undefined),
   }));
   return sharpMock;
