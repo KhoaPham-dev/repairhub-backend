@@ -36,20 +36,83 @@ function constantTimeEquals(a: string, b: string): boolean {
   return crypto.timingSafeEqual(aHash, bHash);
 }
 
-// Auth: `X-Agent-Key` header compared (constant-time) against AGENT_API_KEY.
-// If the env var is unset/empty, the whole Agent API is disabled — this is
-// NOT explicitly stated in api-contracts.md for the unset-env case
-// (contract only documents missing/wrong-key -> 401); disabling via 404
-// (rather than always-401) is the safer choice here since it never implies
-// "a correct key would work" when no key configured on the server could
-// ever succeed. Flagged as a contract gap in the implementation report.
+function isValidAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+interface AgentApiConfig {
+  enabled: boolean;
+  /** Trailing slash(es) stripped. Only meaningful when `enabled` is true. */
+  mediaBaseUrl: string;
+}
+
+// The whole Agent API is disabled (every route returns 404, see
+// authenticateAgent below) unless BOTH AGENT_API_KEY and a valid absolute
+// http(s) PUBLIC_MEDIA_BASE_URL are configured. A relative media URL is
+// useless to an external AI agent — the MCP server's `xem_anh` tool only
+// ever fetches from the one configured absolute origin — so a missing/
+// invalid PUBLIC_MEDIA_BASE_URL is treated exactly like a missing
+// AGENT_API_KEY: the API is not usable, so it should not appear to exist.
+// Read from process.env on every call (not cached at module load) so a
+// config change followed by a process restart takes effect immediately and
+// so this stays testable without module-reload gymnastics.
+function checkAgentApiConfig(): AgentApiConfig {
+  const key = process.env.AGENT_API_KEY;
+  const rawMediaBaseUrl = process.env.PUBLIC_MEDIA_BASE_URL;
+
+  if (!key || !rawMediaBaseUrl || !isValidAbsoluteHttpUrl(rawMediaBaseUrl)) {
+    return { enabled: false, mediaBaseUrl: '' };
+  }
+
+  return { enabled: true, mediaBaseUrl: rawMediaBaseUrl.replace(/\/+$/, '') };
+}
+
+let startupWarningLogged = false;
+
+/**
+ * Logs one warning (never the key itself) at process startup if the Agent
+ * API is disabled due to missing/invalid configuration. Called once from
+ * src/index.ts at server boot — NOT wired into any per-request path, so it
+ * never fires during tests (which never import index.ts) and never repeats
+ * during the life of the process.
+ */
+export function logAgentApiStartupStatus(): void {
+  if (startupWarningLogged) return;
+  if (checkAgentApiConfig().enabled) return;
+  startupWarningLogged = true;
+
+  const reasons: string[] = [];
+  if (!process.env.AGENT_API_KEY) reasons.push('AGENT_API_KEY is not set');
+  if (!process.env.PUBLIC_MEDIA_BASE_URL) {
+    reasons.push('PUBLIC_MEDIA_BASE_URL is not set');
+  } else if (!isValidAbsoluteHttpUrl(process.env.PUBLIC_MEDIA_BASE_URL)) {
+    reasons.push('PUBLIC_MEDIA_BASE_URL is not a valid absolute http(s) URL');
+  }
+
+  console.warn(
+    `[agent-api] Disabled: ${reasons.join('; ')}. ` +
+    'Set both to enable /api/agent/* (every route responds 404 until then).'
+  );
+}
+
+// Auth: `X-Agent-Key` header compared (constant-time) against AGENT_API_KEY,
+// but only once checkAgentApiConfig() confirms the whole API is enabled —
+// see checkAgentApiConfig for why an invalid/missing PUBLIC_MEDIA_BASE_URL
+// disables the API exactly like a missing AGENT_API_KEY. Disabled -> 404
+// rather than always-401, since 401 would imply "a correct key would work,"
+// which is false when the server has no usable configuration at all.
 function authenticateAgent(req: Request, res: Response, next: NextFunction): void {
-  const configuredKey = process.env.AGENT_API_KEY;
-  if (!configuredKey) {
+  if (!checkAgentApiConfig().enabled) {
     res.status(404).json(NOT_FOUND_BODY);
     return;
   }
 
+  const configuredKey = process.env.AGENT_API_KEY!;
   const providedKey = req.headers['x-agent-key'];
   if (typeof providedKey !== 'string' || !constantTimeEquals(providedKey, configuredKey)) {
     res.status(401).json(UNAUTHORIZED_BODY);
@@ -75,8 +138,11 @@ function mediaKindFromPath(imagePath: string): 'photo' | 'video' {
 }
 
 function buildMediaUrl(imagePath: string): string {
-  const base = process.env.PUBLIC_MEDIA_BASE_URL || '';
-  return `${base}/uploads/${imagePath}`;
+  // Safe to call unconditionally: every route handler below only runs after
+  // authenticateAgent has already confirmed checkAgentApiConfig().enabled,
+  // so mediaBaseUrl is always a valid, normalised absolute http(s) URL here.
+  const { mediaBaseUrl } = checkAgentApiConfig();
+  return `${mediaBaseUrl}/uploads/${imagePath}`;
 }
 
 interface OrderRow {

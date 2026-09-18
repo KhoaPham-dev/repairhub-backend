@@ -7,8 +7,11 @@ if (!process.env.JWT_SECRET) {
 }
 
 import app from './app';
+import { logAgentApiStartupStatus } from './routes/agent';
 
 const PORT = process.env.PORT || 6061;
+
+logAgentApiStartupStatus();
 
 const server = app.listen(PORT, () => {
   console.log(`RepairHub API running on port ${PORT}`);

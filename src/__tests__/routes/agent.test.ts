@@ -82,7 +82,43 @@ describe('Agent API auth', () => {
     expect(res.status).toBe(404);
   });
 
-  it('passes through with the correct key', async () => {
+  it('returns 404 on every route when PUBLIC_MEDIA_BASE_URL is unset, even with a valid key', async () => {
+    delete process.env.PUBLIC_MEDIA_BASE_URL;
+    const app = buildApp();
+
+    const resOrders = await request(app).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
+    expect(resOrders.status).toBe(404);
+    expect(resOrders.body).toEqual({ success: false, data: null, error: 'Not found' });
+
+    const resDetail = await request(app).get('/api/agent/orders/20260918-00007').set('X-Agent-Key', AGENT_KEY);
+    expect(resDetail.status).toBe(404);
+
+    const resFeatured = await request(app).get('/api/agent/featured').set('X-Agent-Key', AGENT_KEY);
+    expect(resFeatured.status).toBe(404);
+
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'not-a-url',
+    '/uploads', // relative path — not absolute
+    'ftp://media.example.com', // not http(s)
+    'media.example.com', // missing scheme
+  ])('returns 404 when PUBLIC_MEDIA_BASE_URL is set but not a valid absolute http(s) URL: %s', async (value) => {
+    process.env.PUBLIC_MEDIA_BASE_URL = value;
+    const res = await request(buildApp()).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
+    expect(res.status).toBe(404);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('accepts a valid http:// (not just https://) PUBLIC_MEDIA_BASE_URL', async () => {
+    process.env.PUBLIC_MEDIA_BASE_URL = 'http://media.example.com';
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] }).mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp()).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
+    expect(res.status).toBe(200);
+  });
+
+  it('passes through with the correct key and valid config', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] }).mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp()).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
     expect(res.status).toBe(200);
@@ -90,8 +126,8 @@ describe('Agent API auth', () => {
 });
 
 describe('Agent API — misc parsing edge cases', () => {
-  it('falls back to a relative /uploads URL when PUBLIC_MEDIA_BASE_URL is unset', async () => {
-    delete process.env.PUBLIC_MEDIA_BASE_URL;
+  it('strips a trailing slash from PUBLIC_MEDIA_BASE_URL when building media URLs', async () => {
+    process.env.PUBLIC_MEDIA_BASE_URL = 'https://media.example.com/';
     mockQuery
       .mockResolvedValueOnce({ rows: [{ count: '1' }] })
       .mockResolvedValueOnce({
@@ -105,7 +141,25 @@ describe('Agent API — misc parsing edge cases', () => {
       });
 
     const res = await request(buildApp()).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
-    expect(res.body.data.items[0].media[0].url).toBe('/uploads/abc.jpg');
+    expect(res.body.data.items[0].media[0].url).toBe('https://media.example.com/uploads/abc.jpg');
+  });
+
+  it('strips multiple trailing slashes from PUBLIC_MEDIA_BASE_URL', async () => {
+    process.env.PUBLIC_MEDIA_BASE_URL = 'https://media.example.com///';
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'o1', order_code: '20260918-00007', product_type: 'SPEAKER', device_name: 'JBL Flip 6',
+          fault_description: 'x', status: 'SUA_XONG', created_at: 'x', updated_at: 'y',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'img1', order_id: 'o1', image_path: 'abc.jpg', image_type: 'INTAKE', uploaded_at: 'x' }],
+      });
+
+    const res = await request(buildApp()).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
+    expect(res.body.data.items[0].media[0].url).toBe('https://media.example.com/uploads/abc.jpg');
   });
 
   it('uses only the first value when a query param is repeated (array form)', async () => {
