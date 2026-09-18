@@ -61,9 +61,10 @@ const STATUS_FLOW = [
   'TRA_HANG', 'HUY_TRA_MAY',
 ];
 const TERMINAL_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
-// Statuses that require a fresh COMPLETION photo (taken after the order's
-// most recent status change) before the transition is allowed.
-const IMAGE_REQUIRED_STATUSES = ['DA_GIAO', 'TRA_HANG'];
+// Statuses that require both non-empty notes and a fresh COMPLETION photo
+// (taken after the order's most recent real status transition) as evidence
+// before the transition is allowed.
+const EVIDENCE_REQUIRED_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
 
 // A source order may have multiple warranty orders: <src>-BH, <src>-BH2,
 // <src>-BH3, ... A warranty order's code always ends with this suffix, and a
@@ -517,7 +518,13 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  if (IMAGE_REQUIRED_STATUSES.includes(status)) {
+  if (EVIDENCE_REQUIRED_STATUSES.includes(status)) {
+    const trimmedNotes = typeof notes === 'string' ? notes.trim() : '';
+    if (!trimmedNotes) {
+      res.status(400).json({ success: false, data: null, error: 'Vui lòng nhập ghi chú khi chuyển sang trạng thái Đã giao / Huỷ trả máy' });
+      return;
+    }
+
     // Compare against real status transitions only. PATCH /:id inserts
     // administrative order_status_history rows (old_status = new_status) for
     // warranty-duration edits (RH-133) and notes-only updates; those must not
@@ -530,7 +537,7 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
       [req.params.id]
     );
     if (!completionImage.rows[0]) {
-      res.status(400).json({ success: false, data: null, error: 'Vui lòng tải ảnh khi chuyển sang trạng thái Trả hàng / Đã giao' });
+      res.status(400).json({ success: false, data: null, error: 'Vui lòng tải ảnh khi chuyển sang trạng thái Đã giao / Huỷ trả máy' });
       return;
     }
   }
