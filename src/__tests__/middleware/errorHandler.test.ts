@@ -1,6 +1,14 @@
+jest.mock('fs', () => ({
+  ...jest.requireActual<typeof import('fs')>('fs'),
+  unlinkSync: jest.fn(),
+}));
+
 import { Request, Response, NextFunction } from 'express';
+import fs from 'fs';
 import multer from 'multer';
 import { errorHandler } from '../../middleware/errorHandler';
+
+const mockUnlinkSync = fs.unlinkSync as jest.Mock;
 
 function makeRes(): { status: jest.Mock; json: jest.Mock; res: Partial<Response> } {
   const json = jest.fn();
@@ -15,6 +23,7 @@ describe('errorHandler middleware', () => {
 
   beforeEach(() => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockUnlinkSync.mockReset();
   });
 
   afterEach(() => {
@@ -80,6 +89,64 @@ describe('errorHandler middleware', () => {
     const err = new multer.MulterError('LIMIT_PART_COUNT');
     errorHandler(err as unknown as Error, req, res as Response, next);
     expect(status).toHaveBeenCalledWith(400);
+  });
+
+  it('returns 400 for MulterError LIMIT_FILE_COUNT with the file-count message', () => {
+    const { res, status, json } = makeRes();
+    const err = new multer.MulterError('LIMIT_FILE_COUNT');
+    errorHandler(err as unknown as Error, req, res as Response, next);
+    expect(status).toHaveBeenCalledWith(400);
+    const body = json.mock.calls[0][0];
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Quá nhiều tệp trong một lần tải lên');
+  });
+
+  // ── Cleanup: sibling files already written by multer must not leak ───────
+  it('deletes every file in req.files (array form, e.g. .array()/.any()) on a MulterError', () => {
+    const { res } = makeRes();
+    const reqWithFiles = {
+      files: [{ filename: 'a.jpg' }, { filename: 'b.jpg' }],
+    } as unknown as Request;
+    const err = new multer.MulterError('LIMIT_FILE_SIZE');
+    errorHandler(err as unknown as Error, reqWithFiles, res as Response, next);
+    expect(mockUnlinkSync).toHaveBeenCalledTimes(2);
+    expect(mockUnlinkSync.mock.calls[0][0]).toMatch(/a\.jpg$/);
+    expect(mockUnlinkSync.mock.calls[1][0]).toMatch(/b\.jpg$/);
+  });
+
+  it('deletes every file in req.files (field-map form, e.g. .fields()) on a MulterError', () => {
+    const { res } = makeRes();
+    const reqWithFiles = {
+      files: { images: [{ filename: 'c.jpg' }], videos: [{ filename: 'd.mp4' }] },
+    } as unknown as Request;
+    const err = new multer.MulterError('LIMIT_UNEXPECTED_FILE');
+    errorHandler(err as unknown as Error, reqWithFiles, res as Response, next);
+    expect(mockUnlinkSync).toHaveBeenCalledTimes(2);
+  });
+
+  it('deletes req.file (single-file form, e.g. .single()) on a MulterError', () => {
+    const { res } = makeRes();
+    const reqWithFile = { file: { filename: 'single.jpg' } } as unknown as Request;
+    const err = new multer.MulterError('LIMIT_FILE_SIZE');
+    errorHandler(err as unknown as Error, reqWithFile, res as Response, next);
+    expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
+    expect(mockUnlinkSync.mock.calls[0][0]).toMatch(/single\.jpg$/);
+  });
+
+  it('does not throw and still responds when unlinkSync fails (file already gone)', () => {
+    const { res, status } = makeRes();
+    mockUnlinkSync.mockImplementationOnce(() => { throw new Error('ENOENT'); });
+    const reqWithFiles = { files: [{ filename: 'gone.jpg' }] } as unknown as Request;
+    const err = new multer.MulterError('LIMIT_FILE_SIZE');
+    expect(() => errorHandler(err as unknown as Error, reqWithFiles, res as Response, next)).not.toThrow();
+    expect(status).toHaveBeenCalledWith(413);
+  });
+
+  it('does not attempt cleanup when the request has no files', () => {
+    const { res } = makeRes();
+    const err = new multer.MulterError('LIMIT_FILE_SIZE');
+    errorHandler(err as unknown as Error, req, res as Response, next);
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
   });
 
   // ── RH-139: Status-carrying error (fileFilter error) ─────────────────────

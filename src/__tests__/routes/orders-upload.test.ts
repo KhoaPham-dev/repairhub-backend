@@ -135,6 +135,38 @@ function oversizeBuffer(bytes: number): Buffer {
   return Buffer.alloc(bytes + 1, 0);
 }
 
+/** Minimal buffer with a valid MP4/MOV ftyp box signature (bytes 4-7 = 'ftyp'). */
+function fakeMp4Buffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypmp42', 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    Buffer.from('mp42isom', 'ascii'),
+  ]);
+}
+
+/** Minimal buffer with a valid PNG signature. */
+function fakePngBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  ]);
+}
+
+/** Minimal buffer with a valid WebP (RIFF....WEBP) signature. */
+function fakeWebpBuffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from('RIFF', 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    Buffer.from('WEBP', 'ascii'),
+  ]);
+}
+
+/** Minimal buffer with a valid WebM (EBML) signature. */
+function fakeWebmBuffer(): Buffer {
+  return Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00]);
+}
+
 // Setup order-found mock so auth and order lookup succeed for all upload tests
 function setupOrderFound() {
   mockQuery.mockResolvedValueOnce({ rows: [{ created_by: 'u1' }] }); // order exists
@@ -153,7 +185,7 @@ function setupInsertImage(n = 1) {
 describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
 
   // ── 1. No file-count cap ──────────────────────────────────────────────────
-  it('accepts 12 valid JPEG files in one request (no count cap)', async () => {
+  it('accepts 12 valid JPEG files in one request (under the 20-file cap)', async () => {
     setupOrderFound();
     setupInsertImage(12);
 
@@ -171,6 +203,28 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveLength(12);
+  });
+
+  it('rejects 21 files in one request (over the 20-file cap) and cleans up siblings', async () => {
+    // No setupOrderFound() — LIMIT_FILE_COUNT fires during multipart parsing,
+    // before the route handler runs.
+    const jpg = tinyJpegBuffer();
+    let req = request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('image_type', 'INTAKE');
+
+    for (let i = 0; i < 21; i++) {
+      req = req.attach('images', jpg, { filename: `photo${i}.jpg`, contentType: 'image/jpeg' });
+    }
+
+    const res = await req;
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Quá nhiều tệp trong một lần tải lên');
+    // Sibling files already written before the 21st file tripped the limit
+    // must not leak on disk.
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
   // ── 2. Invalid image_type → 400 ──────────────────────────────────────────
@@ -289,7 +343,7 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
       });
     });
 
-    const videoBuf = Buffer.from('fake mp4 bytes');
+    const videoBuf = fakeMp4Buffer();
     const res = await request(app)
       .post('/api/orders/o1/images')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -302,6 +356,35 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     // Extension must come from the mimetype map, not from the (misleading) originalname
     expect(storedPath).toMatch(/\.mp4$/);
     expect(sharpMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a file whose content does not match its declared mimetype (video/mp4)', async () => {
+    setupOrderFound();
+    // Declares video/mp4 but the content is plain HTML — passes fileFilter
+    // (mimetype is allowed) but must fail the magic-byte signature check.
+    const htmlBuf = Buffer.from('<html><body>not a video</body></html>', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', htmlBuf, { filename: 'fake.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
+  });
+
+  it('rejects a JPEG-declared file whose content does not match (magic-byte check)', async () => {
+    setupOrderFound();
+    const notAJpeg = Buffer.from('this is not actually a jpeg', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', notAJpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 
   // ── 5. HEIC conversion (REAL decode) ──────────────────────────────────────
@@ -369,5 +452,79 @@ describe('POST /api/orders/:id/images — upload behaviour (RH-139)', () => {
     );
     expect(insertCall).toBeDefined();
     expect(insertCall![1]).toContain('INTAKE');
+  });
+});
+
+// ── Magic-byte signature check (per mimetype) ────────────────────────────────
+describe('POST /api/orders/:id/images — magic-byte signature check', () => {
+  it('accepts a PNG whose content matches its declared mimetype', async () => {
+    setupOrderFound();
+    setupInsertImage(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakePngBuffer(), { filename: 'photo.png', contentType: 'image/png' });
+    expect(res.status).toBe(201);
+  });
+
+  it('accepts a WebP whose content matches its declared mimetype', async () => {
+    setupOrderFound();
+    setupInsertImage(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeWebpBuffer(), { filename: 'photo.webp', contentType: 'image/webp' });
+    expect(res.status).toBe(201);
+  });
+
+  it('accepts a WebM video whose content matches its declared mimetype', async () => {
+    setupOrderFound();
+    setupInsertImage(1);
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', fakeWebmBuffer(), { filename: 'clip.webm', contentType: 'video/webm' });
+    expect(res.status).toBe(201);
+  });
+
+  it('rejects a PNG-declared file whose content does not match', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', Buffer.from('not a png'), { filename: 'photo.png', contentType: 'image/png' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+  });
+
+  it('rejects a WebP-declared file whose content does not match', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', Buffer.from('not a webp'), { filename: 'photo.webp', contentType: 'image/webp' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+  });
+
+  it('rejects a WebM-declared file whose content does not match', async () => {
+    setupOrderFound();
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', Buffer.from('not webm'), { filename: 'clip.webm', contentType: 'video/webm' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+  });
+
+  it('rejects an HTML payload declared as video/mp4', async () => {
+    setupOrderFound();
+    const htmlBuf = Buffer.from('<html><body>gotcha</body></html>', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/o1/images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('images', htmlBuf, { filename: 'video.mp4', contentType: 'video/mp4' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
   });
 });

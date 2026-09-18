@@ -19,7 +19,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.join(process.cwd(), process.env.UPLOAD_DIR || 'uploads')));
+app.use('/uploads', express.static(path.join(process.cwd(), process.env.UPLOAD_DIR || 'uploads'), {
+  // Uploaded files (including user-supplied images/videos) are served as-is;
+  // prevent browsers from MIME-sniffing them into something more dangerous
+  // than the declared Content-Type. Belt-and-suspenders for deployments
+  // (e.g. behind a tunnel) where nginx isn't in front adding this itself.
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  },
+}));
 
 app.use('/health', healthRouter);
 app.use('/api/auth', authRouter);

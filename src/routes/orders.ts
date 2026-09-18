@@ -37,6 +37,15 @@ const MIME_EXTENSIONS: Record<string, string> = {
 
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB — enforced per-file, after multer, image-only
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB — multer's single request-wide fileSize cap
+const OVERSIZED_IMAGE_MESSAGE = 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)';
+const INVALID_FILE_CONTENT_MESSAGE = 'Nội dung tệp không khớp định dạng';
+
+// Per-route file-count caps (multer `limits.files`). Named so the intent is
+// clear at each createMediaUpload() call site; LIMIT_FILE_COUNT is mapped to
+// a friendly message in errorHandler.ts.
+const IMAGES_MAX_FILES = 20; // POST /:id/images
+const BULK_IMAGES_MAX_FILES = 50; // POST /bulk-with-images (N products × images each)
+const WARRANTY_MAX_FILES = 10; // POST /warranty-claim
 
 const storage = multer.diskStorage({
   destination: uploadDir,
@@ -49,15 +58,14 @@ const storage = multer.diskStorage({
 // Shared multer config factory for all order media uploads (images + video).
 // multer only supports one request-wide fileSize limit, so it is set to the
 // video max (MAX_VIDEO_SIZE); images are individually re-checked against
-// MAX_IMAGE_SIZE after multer has parsed the request (see rejectOversizedImages).
-// `files` lets the warranty-claim route keep its explicit per-request cap
-// while the other two routes stay uncapped — the one real per-route difference.
-function createMediaUpload(options: { files?: number } = {}) {
+// MAX_IMAGE_SIZE after multer has parsed the request (see validateUploadedFiles).
+// `files` is the one real per-route difference — each route passes its own cap.
+function createMediaUpload(options: { files: number }) {
   return multer({
     storage,
     limits: {
       fileSize: MAX_VIDEO_SIZE,
-      ...(options.files !== undefined ? { files: options.files } : {}),
+      files: options.files,
     },
     fileFilter: (_req, file, cb) => {
       if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
@@ -71,23 +79,87 @@ function createMediaUpload(options: { files?: number } = {}) {
   });
 }
 
-const upload = createMediaUpload();
-// Warranty claim upload config with explicit file count limit
-const warrantyUpload = createMediaUpload({ files: 10 });
+const upload = createMediaUpload({ files: IMAGES_MAX_FILES });
+const warrantyUpload = createMediaUpload({ files: WARRANTY_MAX_FILES });
 
-// Rejects the whole request (and deletes every file multer already wrote for
-// it) if any IMAGE file exceeds MAX_IMAGE_SIZE. Videos are already bounded by
-// multer's fileSize limit (MAX_VIDEO_SIZE) and are not re-checked here.
-function rejectOversizedImages(files: Express.Multer.File[]): boolean {
-  const hasOversizedImage = files.some(
-    (f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && f.size > MAX_IMAGE_SIZE
-  );
-  if (hasOversizedImage) {
-    for (const f of files) {
-      try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
+// Deletes every file multer wrote to disk for this request. Used whenever
+// post-multer validation rejects the request, so nothing is orphaned.
+function deleteFiles(files: Express.Multer.File[]): void {
+  for (const f of files) {
+    try { fs.unlinkSync(path.join(uploadDir, f.filename)); } catch { /* already gone */ }
+  }
+}
+
+// Reads up to the first 32 bytes of a file already written to disk by multer.
+function readFileHeader(filePath: string): Buffer {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const header = Buffer.alloc(32);
+      const bytesRead = fs.readSync(fd, header, 0, 32, 0);
+      return header.subarray(0, bytesRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return Buffer.alloc(0);
+  }
+}
+
+// Verifies a file's magic-byte signature matches its declared (and
+// fileFilter-approved) mimetype, so a spoofed Content-Type can't sneak an
+// arbitrary payload past the extension/mimetype checks.
+function fileSignatureMatches(header: Buffer, mimetype: string): boolean {
+  switch (mimetype) {
+    case 'image/jpeg':
+      return header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    case 'image/png':
+      return header.length >= 8 &&
+        header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47 &&
+        header[4] === 0x0d && header[5] === 0x0a && header[6] === 0x1a && header[7] === 0x0a;
+    case 'image/webp':
+      return header.length >= 12 &&
+        header.toString('ascii', 0, 4) === 'RIFF' &&
+        header.toString('ascii', 8, 12) === 'WEBP';
+    case 'image/heic':
+    case 'image/heif': {
+      if (header.length < 12 || header.toString('ascii', 4, 8) !== 'ftyp') return false;
+      const brand = header.toString('ascii', 8, 12).toLowerCase();
+      return ['heic', 'heix', 'mif1', 'msf1', 'hevc'].includes(brand);
+    }
+    case 'video/mp4':
+    case 'video/quicktime':
+      // MP4/MOV brand variety is wide (isom, mp42, qt  , M4V , ...) — any
+      // ftyp box at offset 4 is accepted.
+      return header.length >= 8 && header.toString('ascii', 4, 8) === 'ftyp';
+    case 'video/webm':
+      return header.length >= 4 &&
+        header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3;
+    default:
+      return false;
+  }
+}
+
+// Runs ALL post-multer file validation (size, then magic-byte signature)
+// before any DB write. On the first failure, deletes every file already
+// written for this request and returns the error message to send; returns
+// null when every file passes. Videos are already bounded by multer's
+// fileSize limit (MAX_VIDEO_SIZE) and are not size-checked here.
+function validateUploadedFiles(files: Express.Multer.File[]): string | null {
+  for (const f of files) {
+    if (ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && f.size > MAX_IMAGE_SIZE) {
+      deleteFiles(files);
+      return OVERSIZED_IMAGE_MESSAGE;
     }
   }
-  return hasOversizedImage;
+  for (const f of files) {
+    const header = readFileHeader(path.join(uploadDir, f.filename));
+    if (!fileSignatureMatches(header, f.mimetype)) {
+      deleteFiles(files);
+      return INVALID_FILE_CONTENT_MESSAGE;
+    }
+  }
+  return null;
 }
 
 const STATUS_FLOW = [
@@ -300,6 +372,15 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
     return;
   }
 
+  // Validate every attached file (size + signature) before touching the DB
+  // at all, so a rejected upload never leaves an orphan warranty order.
+  const files = (req.files as Express.Multer.File[]) || [];
+  const validationError = validateUploadedFiles(files);
+  if (validationError) {
+    res.status(400).json({ success: false, data: null, error: validationError });
+    return;
+  }
+
   // Load source order
   const src = await pool.query('SELECT * FROM orders WHERE id = $1', [source_order_id]);
   if (!src.rows[0]) {
@@ -315,54 +396,78 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
     return;
   }
 
-  // Create BH order. A source order may already have prior warranty orders
-  // (-BH, -BH2, ...); compute the next code, retrying on a unique-constraint
-  // race with a concurrent claim for the same source.
+  // Create the BH order, its history row, and any attached images/videos in
+  // a single transaction (mirrors /bulk-with-images) so a mid-way DB failure
+  // never leaves an orphan warranty order without its evidence, and every
+  // written file is removed on rollback. A source order may already have
+  // prior warranty orders (-BH, -BH2, ...); compute the next code, retrying
+  // via SAVEPOINT (a failed statement aborts the rest of an open Postgres
+  // transaction, so a plain retry within the same transaction would not
+  // work) on a unique-constraint race with a concurrent claim for the same
+  // source.
   const MAX_CODE_ATTEMPTS = 3;
   let bhCode = await nextWarrantyCode(sourceOrder.order_code);
-  let result: QueryResult | undefined;
-  for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
-    try {
-      result = await pool.query(
-        `INSERT INTO orders
-           (order_code, customer_id, branch_id, created_by, product_type, device_name,
-            serial_imei, fault_description, quotation, warranty_period_months, status)
-         VALUES ($1,$2,$3,$4,'BAO_HANH',$5,$6,$7,0,$8,'DANG_BAO_HANH')
-         RETURNING *`,
-        [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
-         sourceOrder.device_name, sourceOrder.serial_imei,
-         fault_description || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
-      );
-      break;
-    } catch (err) {
-      if ((err as { code?: string }).code === '23505' && attempt < MAX_CODE_ATTEMPTS) {
-        bhCode = await nextWarrantyCode(sourceOrder.order_code);
-        continue;
+  const client = await pool.connect();
+  const writtenFiles: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let newOrder: any;
+
+  try {
+    await client.query('BEGIN');
+
+    let result: QueryResult | undefined;
+    for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
+      await client.query('SAVEPOINT warranty_code_attempt');
+      try {
+        result = await client.query(
+          `INSERT INTO orders
+             (order_code, customer_id, branch_id, created_by, product_type, device_name,
+              serial_imei, fault_description, quotation, warranty_period_months, status)
+           VALUES ($1,$2,$3,$4,'BAO_HANH',$5,$6,$7,0,$8,'DANG_BAO_HANH')
+           RETURNING *`,
+          [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
+           sourceOrder.device_name, sourceOrder.serial_imei,
+           fault_description || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
+        );
+        break;
+      } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT warranty_code_attempt');
+        if ((err as { code?: string }).code === '23505' && attempt < MAX_CODE_ATTEMPTS) {
+          bhCode = await nextWarrantyCode(sourceOrder.order_code);
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
-  }
-  const newOrder = result!.rows[0];
+    newOrder = result!.rows[0];
 
-  await pool.query(
-    `INSERT INTO order_status_history (order_id, changed_by, new_status, notes)
-     VALUES ($1,$2,'DANG_BAO_HANH',$3)`,
-    [newOrder.id, req.user!.id, fault_description || null]
-  );
-
-  // Process and insert images/videos for this warranty order
-  const files = req.files as Express.Multer.File[] || [];
-  if (rejectOversizedImages(files)) {
-    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
-    return;
-  }
-  for (const file of files) {
-    const finalFilename = await storeUploadedMedia(file);
-    await pool.query(
-      `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
-       VALUES ($1,$2,'INTAKE',$3)`,
-      [newOrder.id, finalFilename, req.user!.id]
+    await client.query(
+      `INSERT INTO order_status_history (order_id, changed_by, new_status, notes)
+       VALUES ($1,$2,'DANG_BAO_HANH',$3)`,
+      [newOrder.id, req.user!.id, fault_description || null]
     );
+
+    // Process and insert images/videos for this warranty order
+    for (const file of files) {
+      const finalFilename = await storeUploadedMedia(file);
+      writtenFiles.push(path.join(uploadDir, finalFilename));
+      await client.query(
+        `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
+         VALUES ($1,$2,'INTAKE',$3)`,
+        [newOrder.id, finalFilename, req.user!.id]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    // Best-effort cleanup of any files written before the failure
+    for (const filePath of writtenFiles) {
+      try { fs.unlinkSync(filePath); } catch { /* already gone */ }
+    }
+    throw err;
+  } finally {
+    client.release();
   }
 
   await logActivity(req.user!.id, 'CREATE_WARRANTY_ORDER', 'order', newOrder.id, { source: source_order_id });
@@ -687,8 +792,9 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
     return;
   }
 
-  if (rejectOversizedImages(files)) {
-    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
+  const validationError = validateUploadedFiles(files);
+  if (validationError) {
+    res.status(400).json({ success: false, data: null, error: validationError });
     return;
   }
 
@@ -726,7 +832,7 @@ router.post('/:id/images', upload.array('images'), asyncHandler(async (req: Requ
 
 const VALID_PRODUCT_TYPES = new Set(['SPEAKER', 'HEADPHONE', 'OTHER', 'BAO_HANH']);
 
-const uploadAny = createMediaUpload();
+const uploadAny = createMediaUpload({ files: BULK_IMAGES_MAX_FILES });
 
 router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Request, res: Response) => {
   // ── 1. Parse and validate payload ────────────────────────────────────────
@@ -778,8 +884,9 @@ router.post('/bulk-with-images', uploadAny.any(), asyncHandler(async (req: Reque
   // multer .any() puts all files in req.files as Express.Multer.File[] with
   // a .fieldname property. Fields named images_<i> map to product index i.
   const allFiles = (req.files as Express.Multer.File[]) || [];
-  if (rejectOversizedImages(allFiles)) {
-    res.status(400).json({ success: false, data: null, error: 'Ảnh quá lớn (tối đa 10MB mỗi ảnh)' });
+  const validationError = validateUploadedFiles(allFiles);
+  if (validationError) {
+    res.status(400).json({ success: false, data: null, error: validationError });
     return;
   }
   const filesByProduct = new Map<number, Express.Multer.File[]>();

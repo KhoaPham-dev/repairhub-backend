@@ -317,9 +317,13 @@ describe('POST /api/orders/warranty-claim', () => {
     };
     mockQuery
       .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order
-      .mockResolvedValueOnce({ rows: [] })            // existing -BH* codes — none
-      .mockResolvedValueOnce({ rows: [newBhOrder] })  // INSERT BH order
-      .mockResolvedValueOnce({ rows: [] });           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });           // existing -BH* codes — none
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -332,8 +336,10 @@ describe('POST /api/orders/warranty-claim', () => {
     const likeCall = mockQuery.mock.calls[1];
     expect(likeCall[0]).toMatch(/order_code LIKE/);
     expect(likeCall[1]).toEqual(['ORD-20260425-00001-BH%']);
-    const insertCall = mockQuery.mock.calls[2];
+    const insertCall = mockClientQuery.mock.calls[2];
+    expect(insertCall[0]).toMatch(/INSERT INTO orders/);
     expect(insertCall[1][0]).toBe('ORD-20260425-00001-BH');
+    expect(mockClientRelease).toHaveBeenCalled();
   });
 
   it('creates a second warranty claim order as -BH2 when -BH already exists', async () => {
@@ -345,16 +351,20 @@ describe('POST /api/orders/warranty-claim', () => {
     const newBhOrder = { id: 'bh2', order_code: 'ORD-20260425-00001-BH2', status: 'DANG_BAO_HANH' };
     mockQuery
       .mockResolvedValueOnce({ rows: [sourceOrder] })
-      .mockResolvedValueOnce({ rows: [{ order_code: 'ORD-20260425-00001-BH' }] })
-      .mockResolvedValueOnce({ rows: [newBhOrder] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [{ order_code: 'ORD-20260425-00001-BH' }] });
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ source_order_id: 'o1', branch_id: 'b1' });
     expect(res.status).toBe(201);
     expect(res.body.data.order_code).toBe('ORD-20260425-00001-BH2');
-    const insertCall = mockQuery.mock.calls[2];
+    const insertCall = mockClientQuery.mock.calls[2];
     expect(insertCall[1][0]).toBe('ORD-20260425-00001-BH2');
   });
 
@@ -372,9 +382,13 @@ describe('POST /api/orders/warranty-claim', () => {
           { order_code: 'ORD-20260425-00001-BH' },
           { order_code: 'ORD-20260425-00001-BH2' },
         ],
-      })
-      .mockResolvedValueOnce({ rows: [newBhOrder] })
-      .mockResolvedValueOnce({ rows: [] });
+      });
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -400,15 +414,19 @@ describe('POST /api/orders/warranty-claim', () => {
           { order_code: 'X2-BH' },
           { order_code: 'X1-BH' },
         ],
-      })
-      .mockResolvedValueOnce({ rows: [newBhOrder] })
-      .mockResolvedValueOnce({ rows: [] });
+      });
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ source_order_id: 'o1', branch_id: 'b1' });
     expect(res.status).toBe(201);
-    const insertCall = mockQuery.mock.calls[2];
+    const insertCall = mockClientQuery.mock.calls[2];
     expect(insertCall[1][0]).toBe('X1-BH2');
   });
 
@@ -428,19 +446,23 @@ describe('POST /api/orders/warranty-claim', () => {
           { order_code: 'S2-BH99999999999999999999' },
           { order_code: 'S2-BH' },
         ],
-      })
-      .mockResolvedValueOnce({ rows: [newBhOrder] })
-      .mockResolvedValueOnce({ rows: [] });
+      });
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT BH order
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ source_order_id: 'o1', branch_id: 'b1' });
     expect(res.status).toBe(201);
-    const insertCall = mockQuery.mock.calls[2];
+    const insertCall = mockClientQuery.mock.calls[2];
     expect(insertCall[1][0]).toBe('S2-BH2');
   });
 
-  it('retries with the next code on a unique-violation race and succeeds', async () => {
+  it('retries with the next code (via SAVEPOINT) on a unique-violation race and succeeds', async () => {
     const sourceOrder = {
       id: 'o1', order_code: 'S1', product_type: 'SPEAKER',
       customer_id: 'c1', device_name: 'JBL Flip 6',
@@ -449,22 +471,30 @@ describe('POST /api/orders/warranty-claim', () => {
     const newBhOrder = { id: 'bh2', order_code: 'S1-BH2', status: 'DANG_BAO_HANH' };
     const conflictErr = Object.assign(new Error('duplicate key'), { code: '23505' });
     mockQuery
-      .mockResolvedValueOnce({ rows: [sourceOrder] })                     // source order
-      .mockResolvedValueOnce({ rows: [] })                                // existing codes — none (stale read)
-      .mockRejectedValueOnce(conflictErr)                                 // INSERT attempt 1 — race lost
-      .mockResolvedValueOnce({ rows: [{ order_code: 'S1-BH' }] })         // recompute — -BH now taken
-      .mockResolvedValueOnce({ rows: [newBhOrder] })                      // INSERT attempt 2 — succeeds
-      .mockResolvedValueOnce({ rows: [] });                               // INSERT status history
+      .mockResolvedValueOnce({ rows: [sourceOrder] })             // source order
+      .mockResolvedValueOnce({ rows: [] })                        // existing codes — none (stale read)
+      .mockResolvedValueOnce({ rows: [{ order_code: 'S1-BH' }] }); // recompute — -BH now taken
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT (attempt 1)
+      .mockRejectedValueOnce(conflictErr)            // INSERT attempt 1 — race lost
+      .mockResolvedValueOnce({ rows: [] })           // ROLLBACK TO SAVEPOINT (attempt 1)
+      .mockResolvedValueOnce({ rows: [] })           // SAVEPOINT (attempt 2)
+      .mockResolvedValueOnce({ rows: [newBhOrder] }) // INSERT attempt 2 — succeeds
+      .mockResolvedValueOnce({ rows: [] })           // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });          // COMMIT
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ source_order_id: 'o1', branch_id: 'b1' });
     expect(res.status).toBe(201);
     expect(res.body.data.order_code).toBe('S1-BH2');
-    expect(mockQuery).toHaveBeenCalledTimes(6);
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+    expect(mockClientQuery).toHaveBeenCalledTimes(8);
+    expect(mockClientRelease).toHaveBeenCalled();
   });
 
-  it('rethrows after exhausting retries on persistent unique violations', async () => {
+  it('rethrows after exhausting retries on persistent unique violations, and rolls back', async () => {
     const sourceOrder = {
       id: 'o1', order_code: 'S1', product_type: 'SPEAKER',
       customer_id: 'c1', device_name: 'JBL Flip 6',
@@ -474,17 +504,41 @@ describe('POST /api/orders/warranty-claim', () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order
       .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 1)
-      .mockRejectedValueOnce(conflictErr)             // INSERT attempt 1
       .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 2)
-      .mockRejectedValueOnce(conflictErr)             // INSERT attempt 2
-      .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 3)
-      .mockRejectedValueOnce(conflictErr);            // INSERT attempt 3 — exhausted, rethrow
+      .mockResolvedValueOnce({ rows: [] });           // existing codes (attempt 3)
+    mockClientQuery
+      .mockResolvedValueOnce({ rows: [] })   // BEGIN
+      .mockResolvedValueOnce({ rows: [] })   // SAVEPOINT (attempt 1)
+      .mockRejectedValueOnce(conflictErr)    // INSERT attempt 1
+      .mockResolvedValueOnce({ rows: [] })   // ROLLBACK TO SAVEPOINT (attempt 1)
+      .mockResolvedValueOnce({ rows: [] })   // SAVEPOINT (attempt 2)
+      .mockRejectedValueOnce(conflictErr)    // INSERT attempt 2
+      .mockResolvedValueOnce({ rows: [] })   // ROLLBACK TO SAVEPOINT (attempt 2)
+      .mockResolvedValueOnce({ rows: [] })   // SAVEPOINT (attempt 3)
+      .mockRejectedValueOnce(conflictErr)    // INSERT attempt 3 — exhausted, rethrow
+      .mockResolvedValueOnce({ rows: [] })   // ROLLBACK TO SAVEPOINT (attempt 3)
+      .mockResolvedValueOnce({ rows: [] });  // ROLLBACK (full transaction, outer catch)
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ source_order_id: 'o1', branch_id: 'b1' });
     expect(res.status).toBe(500);
-    expect(mockQuery).toHaveBeenCalledTimes(7);
+    expect(mockQuery).toHaveBeenCalledTimes(4);
+    expect(mockClientQuery).toHaveBeenCalledTimes(11);
+    const queryTexts = mockClientQuery.mock.calls.map((c: unknown[]) => c[0]);
+    expect(queryTexts).toContain('ROLLBACK');
+    expect(queryTexts).not.toContain('COMMIT');
+    expect(mockClientRelease).toHaveBeenCalled();
+  });
+
+  it('never opens a DB connection when required fields are missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1' }); // missing branch_id
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockConnect).not.toHaveBeenCalled();
   });
 });
 

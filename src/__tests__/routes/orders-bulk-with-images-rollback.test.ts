@@ -57,10 +57,23 @@ jest.mock('sharp', () => {
   return fn;
 });
 
-// Mock fs.unlinkSync so cleanup assertions can be verified
+// Mock fs.unlinkSync so cleanup assertions can be verified. Also mock the
+// open/read/close trio used by the magic-byte signature check — the injected
+// files here are synthetic (no real bytes on disk), so without this the
+// signature check would always fail and reject the request before it ever
+// reaches the transaction this file is testing. Returning a valid JPEG
+// signature keeps the injected 'image/jpeg' fixture passing validation.
 jest.mock('fs', () => ({
   ...jest.requireActual<typeof import('fs')>('fs'),
   unlinkSync: jest.fn(),
+  openSync: jest.fn(() => 999),
+  readSync: jest.fn((_fd: number, buffer: Buffer) => {
+    buffer[0] = 0xff;
+    buffer[1] = 0xd8;
+    buffer[2] = 0xff;
+    return 3;
+  }),
+  closeSync: jest.fn(),
 }));
 
 import request from 'supertest';

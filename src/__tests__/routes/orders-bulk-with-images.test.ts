@@ -134,6 +134,16 @@ function tinyJpegBuffer(): Buffer {
   );
 }
 
+/** Minimal buffer with a valid MP4/MOV ftyp box signature (bytes 4-7 = 'ftyp'). */
+function fakeMp4Buffer(): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypmp42', 'ascii'),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    Buffer.from('mp42isom', 'ascii'),
+  ]);
+}
+
 /** Build a valid multipart payload JSON string. */
 function makePayload(overrides: object = {}): string {
   return JSON.stringify({
@@ -486,7 +496,7 @@ describe('POST /api/orders/bulk-with-images — video uploads (RH-video)', () =>
     const order = { id: 'oV', order_code: '20260618-00000', status: 'TIEP_NHAN' };
     setupSuccessfulTransaction([order], [1]);
 
-    const videoBuf = Buffer.from('fake mp4 bytes');
+    const videoBuf = fakeMp4Buffer();
     const res = await request(app)
       .post('/api/orders/bulk-with-images')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -502,5 +512,20 @@ describe('POST /api/orders/bulk-with-images — video uploads (RH-video)', () =>
     // Extension must come from the mimetype map, not from the (misleading) originalname
     expect(storedPath).toMatch(/\.mp4$/);
     expect(sharpMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an HTML payload declared as video/mp4 (magic-byte check), no transaction started', async () => {
+    const htmlBuf = Buffer.from('<html><body>gotcha</body></html>', 'utf8');
+    const res = await request(app)
+      .post('/api/orders/bulk-with-images')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('payload', makePayload())
+      .attach('images_0', htmlBuf, { filename: 'video.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Nội dung tệp không khớp định dạng');
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpDir)).toHaveLength(0);
   });
 });
