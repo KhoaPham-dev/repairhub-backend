@@ -30,6 +30,7 @@ router.get('/search', asyncHandler(async (req: Request, res: Response) => {
      JOIN customers c ON c.id = o.customer_id
      JOIN branches b ON b.id = o.branch_id
      WHERE o.status = 'DA_GIAO'
+       AND o.product_type <> 'BAO_HANH'
        AND (c.phone ILIKE $1 OR o.serial_imei ILIKE $1 OR o.device_name ILIKE $1)
      ORDER BY o.updated_at DESC
      LIMIT 50`,

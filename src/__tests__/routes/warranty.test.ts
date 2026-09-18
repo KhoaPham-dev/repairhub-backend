@@ -46,4 +46,14 @@ describe('GET /api/warranty/search', () => {
     expect(res.status).toBe(200);
     expect(res.body.data[0].warranty_status).toBe('ACTIVE');
   });
+
+  it('excludes warranty orders (product_type BAO_HANH) from search results', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .get('/api/warranty/search?q=SN123')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const sql = mockQuery.mock.calls[0][0] as string;
+    expect(sql).toMatch(/o\.product_type <> 'BAO_HANH'/);
+  });
 });

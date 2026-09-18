@@ -274,26 +274,40 @@ describe('POST /api/orders/warranty-claim', () => {
     expect(res.body.error).toMatch(/đơn gốc/);
   });
 
-  it('returns 409 when warranty order already exists', async () => {
+  it('returns 400 when source order is itself a warranty order (product_type BAO_HANH)', async () => {
     const sourceOrder = {
-      id: 'o1', order_code: 'ORD-20260425-00001',
-      customer_id: 'c1', device_name: 'JBL Flip 6',
+      id: 'bh1', order_code: 'ORD-20260425-00001-BH',
+      product_type: 'BAO_HANH', customer_id: 'c1', device_name: 'JBL Flip 6',
       serial_imei: 'SN123', warranty_period_months: 12,
     };
-    mockQuery
-      .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order found
-      .mockResolvedValueOnce({ rows: [{ id: 'bh1' }] }); // duplicate BH order exists
+    mockQuery.mockResolvedValueOnce({ rows: [sourceOrder] }); // source order found
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ source_order_id: 'o1', branch_id: 'b1' });
-    expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/Bảo Hành/);
+      .send({ source_order_id: 'bh1', branch_id: 'b1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/đơn bảo hành/);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no further queries once rejected
   });
 
-  it('creates warranty claim order successfully', async () => {
+  it('returns 400 when source order_code matches the warranty suffix (e.g. -BH2)', async () => {
     const sourceOrder = {
-      id: 'o1', order_code: 'ORD-20260425-00001',
+      id: 'bh2', order_code: 'ORD-20260425-00001-BH2',
+      product_type: 'SPEAKER', customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    mockQuery.mockResolvedValueOnce({ rows: [sourceOrder] });
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'bh2', branch_id: 'b1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/đơn bảo hành/);
+  });
+
+  it('creates the first warranty claim order with code -BH when none exist yet', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'ORD-20260425-00001', product_type: 'SPEAKER',
       customer_id: 'c1', device_name: 'JBL Flip 6',
       serial_imei: 'SN123', warranty_period_months: 12,
     };
@@ -303,9 +317,9 @@ describe('POST /api/orders/warranty-claim', () => {
     };
     mockQuery
       .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order
-      .mockResolvedValueOnce({ rows: [] })            // duplicate check — none
+      .mockResolvedValueOnce({ rows: [] })            // existing -BH* codes — none
       .mockResolvedValueOnce({ rows: [newBhOrder] })  // INSERT BH order
-      .mockResolvedValueOnce({ rows: [] });            // INSERT status history
+      .mockResolvedValueOnce({ rows: [] });           // INSERT status history
     const res = await request(buildApp())
       .post('/api/orders/warranty-claim')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -314,6 +328,135 @@ describe('POST /api/orders/warranty-claim', () => {
     expect(res.body.data.order_code).toBe('ORD-20260425-00001-BH');
     expect(res.body.data.status).toBe('DANG_BAO_HANH');
     expect(mockLogActivity).toHaveBeenCalledWith('u1', 'CREATE_WARRANTY_ORDER', 'order', 'bh1', { source: 'o1' });
+
+    const likeCall = mockQuery.mock.calls[1];
+    expect(likeCall[0]).toMatch(/order_code LIKE/);
+    expect(likeCall[1]).toEqual(['ORD-20260425-00001-BH%']);
+    const insertCall = mockQuery.mock.calls[2];
+    expect(insertCall[1][0]).toBe('ORD-20260425-00001-BH');
+  });
+
+  it('creates a second warranty claim order as -BH2 when -BH already exists', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'ORD-20260425-00001', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = { id: 'bh2', order_code: 'ORD-20260425-00001-BH2', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] })
+      .mockResolvedValueOnce({ rows: [{ order_code: 'ORD-20260425-00001-BH' }] })
+      .mockResolvedValueOnce({ rows: [newBhOrder] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order_code).toBe('ORD-20260425-00001-BH2');
+    const insertCall = mockQuery.mock.calls[2];
+    expect(insertCall[1][0]).toBe('ORD-20260425-00001-BH2');
+  });
+
+  it('creates a third warranty claim order as -BH3 when -BH and -BH2 already exist', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'ORD-20260425-00001', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = { id: 'bh3', order_code: 'ORD-20260425-00001-BH3', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] })
+      .mockResolvedValueOnce({
+        rows: [
+          { order_code: 'ORD-20260425-00001-BH' },
+          { order_code: 'ORD-20260425-00001-BH2' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [newBhOrder] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order_code).toBe('ORD-20260425-00001-BH3');
+  });
+
+  it('ignores order codes that only superficially resemble the source prefix', async () => {
+    // 'X1-BHfoo' isn't a valid -BH<digits> suffix, and 'X2-BH' belongs to a
+    // different source — neither should influence the numbering for 'X1'.
+    const sourceOrder = {
+      id: 'o1', order_code: 'X1', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = { id: 'bh2', order_code: 'X1-BH2', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] })
+      .mockResolvedValueOnce({
+        rows: [
+          { order_code: 'X1-BHfoo' },
+          { order_code: 'X2-BH' },
+          { order_code: 'X1-BH' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [newBhOrder] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls[2];
+    expect(insertCall[1][0]).toBe('X1-BH2');
+  });
+
+  it('retries with the next code on a unique-violation race and succeeds', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'S1', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = { id: 'bh2', order_code: 'S1-BH2', status: 'DANG_BAO_HANH' };
+    const conflictErr = Object.assign(new Error('duplicate key'), { code: '23505' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] })                     // source order
+      .mockResolvedValueOnce({ rows: [] })                                // existing codes — none (stale read)
+      .mockRejectedValueOnce(conflictErr)                                 // INSERT attempt 1 — race lost
+      .mockResolvedValueOnce({ rows: [{ order_code: 'S1-BH' }] })         // recompute — -BH now taken
+      .mockResolvedValueOnce({ rows: [newBhOrder] })                      // INSERT attempt 2 — succeeds
+      .mockResolvedValueOnce({ rows: [] });                               // INSERT status history
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order_code).toBe('S1-BH2');
+    expect(mockQuery).toHaveBeenCalledTimes(6);
+  });
+
+  it('rethrows after exhausting retries on persistent unique violations', async () => {
+    const sourceOrder = {
+      id: 'o1', order_code: 'S1', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const conflictErr = Object.assign(new Error('duplicate key'), { code: '23505' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] }) // source order
+      .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 1)
+      .mockRejectedValueOnce(conflictErr)             // INSERT attempt 1
+      .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 2)
+      .mockRejectedValueOnce(conflictErr)             // INSERT attempt 2
+      .mockResolvedValueOnce({ rows: [] })            // existing codes (attempt 3)
+      .mockRejectedValueOnce(conflictErr);            // INSERT attempt 3 — exhausted, rethrow
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(500);
+    expect(mockQuery).toHaveBeenCalledTimes(7);
   });
 });
 
@@ -476,6 +619,23 @@ describe('GET /api/orders/:id', () => {
     const res = await request(buildApp()).get('/api/orders/bh2').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.data.source_order_history).toEqual([]);
+  });
+
+  it('derives the source code by stripping a multi-warranty suffix like -BH2', async () => {
+    const bhOrder = { id: 'bh3', order_code: 'ORD002-BH2', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [bhOrder] })          // fetch BH order
+      .mockResolvedValueOnce({ rows: [] })                 // BH order history
+      .mockResolvedValueOnce({ rows: [] })                 // images
+      .mockResolvedValueOnce({ rows: [{ id: 'src2' }] })   // source order lookup
+      .mockResolvedValueOnce({ rows: [] });                // source order history
+    const res = await request(buildApp()).get('/api/orders/bh3').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.source_order_id).toBe('src2');
+    const sourceLookupCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('order_code = $1') && call[1]?.[0] === 'ORD002'
+    );
+    expect(sourceLookupCall).toBeDefined();
   });
 });
 

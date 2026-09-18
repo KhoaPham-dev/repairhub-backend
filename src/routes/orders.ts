@@ -4,6 +4,7 @@ import fs from 'fs';
 import multer from 'multer';
 import sharp from 'sharp';
 import heicConvert from 'heic-convert';
+import { QueryResult } from 'pg';
 import { pool } from '../config/database';
 import { authenticate } from '../middleware/auth';
 import { logActivity } from '../utils/activityLog';
@@ -61,6 +62,11 @@ const STATUS_FLOW = [
 ];
 const TERMINAL_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
 
+// A source order may have multiple warranty orders: <src>-BH, <src>-BH2,
+// <src>-BH3, ... A warranty order's code always ends with this suffix, and a
+// warranty order cannot itself be the source of another warranty claim.
+const WARRANTY_CODE_SUFFIX_RE = /-BH\d*$/;
+
 // Compute year + YYYYMMDD in Asia/Ho_Chi_Minh (UTC+7) so the annual reset
 // and the date prefix match the operator's calendar, not the server clock.
 // 'sv-SE' locale yields ISO-like output ("2026-05-05 14:30:00") which is easy
@@ -87,6 +93,41 @@ export async function generateOrderCode(now: Date = new Date()): Promise<string>
   );
   const seq = String(result.rows[0].last_issued).padStart(5, '0');
   return `${ymd}-${seq}`;
+}
+
+// Escape SQL LIKE wildcards (%, _) so a literal order code can be embedded
+// in a LIKE pattern without being interpreted as a wildcard.
+function escapeLikeWildcards(s: string): string {
+  return s.replace(/[\\%_]/g, '\\$&');
+}
+
+// Escape regex metacharacters so a literal order code can be embedded in a
+// RegExp pattern safely.
+function escapeRegExpChars(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Compute the next warranty code for a given source order code. A source may
+// have multiple warranty orders: <src>-BH (first), <src>-BH2, <src>-BH3, ...
+// The LIKE query narrows candidates (best-effort, wildcards escaped); the
+// exact regex is the authority that decides which rows actually match, so a
+// coincidentally similar order code (e.g. a different source with a shared
+// prefix) can never inflate the count.
+async function nextWarrantyCode(sourceCode: string): Promise<string> {
+  const likePattern = `${escapeLikeWildcards(sourceCode)}-BH%`;
+  const existing = await pool.query<{ order_code: string }>(
+    'SELECT order_code FROM orders WHERE order_code LIKE $1',
+    [likePattern]
+  );
+  const exactRe = new RegExp(`^${escapeRegExpChars(sourceCode)}-BH(\\d*)$`);
+  let maxN = 0;
+  for (const row of existing.rows) {
+    const match = exactRe.exec(row.order_code);
+    if (!match) continue;
+    const n = match[1] === '' ? 1 : Number(match[1]);
+    if (n > maxN) maxN = n;
+  }
+  return maxN === 0 ? `${sourceCode}-BH` : `${sourceCode}-BH${maxN + 1}`;
 }
 
 router.get('/', asyncHandler(async (req: Request, res: Response) => {
@@ -217,31 +258,46 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
   }
 
   const sourceOrder = src.rows[0];
-  const bhCode = `${sourceOrder.order_code}-BH`;
 
-  // Check duplicate
-  const dup = await pool.query('SELECT id FROM orders WHERE order_code = $1', [bhCode]);
-  if (dup.rows.length > 0) {
-    res.status(409).json({ success: false, data: null, error: 'Đơn này đã trong Bảo Hành' });
+  // A warranty order cannot itself be the source of another warranty claim.
+  if (sourceOrder.product_type === 'BAO_HANH' || WARRANTY_CODE_SUFFIX_RE.test(sourceOrder.order_code)) {
+    res.status(400).json({ success: false, data: null, error: 'Không thể tạo bảo hành cho đơn bảo hành' });
     return;
   }
 
-  // Create BH order
-  const result = await pool.query(
-    `INSERT INTO orders
-       (order_code, customer_id, branch_id, created_by, product_type, device_name,
-        serial_imei, fault_description, quotation, warranty_period_months, status)
-     VALUES ($1,$2,$3,$4,'BAO_HANH',$5,$6,$7,0,$8,'DANG_BAO_HANH')
-     RETURNING *`,
-    [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
-     sourceOrder.device_name, sourceOrder.serial_imei,
-     fault_description || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
-  );
+  // Create BH order. A source order may already have prior warranty orders
+  // (-BH, -BH2, ...); compute the next code, retrying on a unique-constraint
+  // race with a concurrent claim for the same source.
+  const MAX_CODE_ATTEMPTS = 3;
+  let bhCode = await nextWarrantyCode(sourceOrder.order_code);
+  let result: QueryResult | undefined;
+  for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
+    try {
+      result = await pool.query(
+        `INSERT INTO orders
+           (order_code, customer_id, branch_id, created_by, product_type, device_name,
+            serial_imei, fault_description, quotation, warranty_period_months, status)
+         VALUES ($1,$2,$3,$4,'BAO_HANH',$5,$6,$7,0,$8,'DANG_BAO_HANH')
+         RETURNING *`,
+        [bhCode, sourceOrder.customer_id, branch_id, req.user!.id,
+         sourceOrder.device_name, sourceOrder.serial_imei,
+         fault_description || 'Bảo hành thiết bị', sourceOrder.warranty_period_months || 12]
+      );
+      break;
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505' && attempt < MAX_CODE_ATTEMPTS) {
+        bhCode = await nextWarrantyCode(sourceOrder.order_code);
+        continue;
+      }
+      throw err;
+    }
+  }
+  const newOrder = result!.rows[0];
 
   await pool.query(
     `INSERT INTO order_status_history (order_id, changed_by, new_status, notes)
      VALUES ($1,$2,'DANG_BAO_HANH',$3)`,
-    [result.rows[0].id, req.user!.id, fault_description || null]
+    [newOrder.id, req.user!.id, fault_description || null]
   );
 
   // Process and insert images for this warranty order
@@ -251,12 +307,12 @@ router.post('/warranty-claim', warrantyUpload.any(), asyncHandler(async (req: Re
     await pool.query(
       `INSERT INTO order_images (order_id, image_path, image_type, uploaded_by)
        VALUES ($1,$2,'INTAKE',$3)`,
-      [result.rows[0].id, finalFilename, req.user!.id]
+      [newOrder.id, finalFilename, req.user!.id]
     );
   }
 
-  await logActivity(req.user!.id, 'CREATE_WARRANTY_ORDER', 'order', result.rows[0].id, { source: source_order_id });
-  res.status(201).json({ success: true, data: result.rows[0], error: null });
+  await logActivity(req.user!.id, 'CREATE_WARRANTY_ORDER', 'order', newOrder.id, { source: source_order_id });
+  res.status(201).json({ success: true, data: newOrder, error: null });
 }));
 
 router.post('/bulk', asyncHandler(async (req: Request, res: Response) => {
@@ -339,12 +395,13 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
     pool.query('SELECT * FROM order_images WHERE order_id = $1 ORDER BY uploaded_at', [req.params.id]),
   ]);
 
-  // RH-134: for warranty orders (order_code ends with -BH), fetch source order history
+  // RH-134: for warranty orders (order_code ends with -BH, -BH2, -BH3, ...),
+  // fetch source order history.
   const orderCode: string = result.rows[0].order_code ?? '';
   let source_order_history: Record<string, unknown>[] | null = null;
   let source_order_id: string | null = null;
-  if (orderCode.endsWith('-BH')) {
-    const sourceCode = orderCode.slice(0, -3);
+  if (WARRANTY_CODE_SUFFIX_RE.test(orderCode)) {
+    const sourceCode = orderCode.replace(WARRANTY_CODE_SUFFIX_RE, '');
     const sourceOrder = await pool.query(
       'SELECT id FROM orders WHERE order_code = $1',
       [sourceCode]

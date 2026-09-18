@@ -61,7 +61,8 @@ function vnDateParts(d: Date): { year: number; ymd: string } {
   return { year: Number(year), ymd: `${year}${month}${day}` };
 }
 
-const NEW_FORMAT_RE = /^\d{8}-\d{5}(-BH)?$/;
+const NEW_FORMAT_RE = /^\d{8}-\d{5}(-BH\d*)?$/;
+const WARRANTY_SUFFIX_RE = /-BH\d*$/;
 
 interface OrderRow {
   id: string;
@@ -132,12 +133,15 @@ async function run() {
         runningSeq = 0;
       }
 
-      const isWarranty = row.order_code.endsWith('-BH');
+      const warrantyMatch = WARRANTY_SUFFIX_RE.exec(row.order_code);
+      const isWarranty = warrantyMatch !== null;
       let newCode: string;
 
       if (isWarranty) {
-        // Warranty: derive from the rewritten source order's new code.
-        const oldSourceCode = row.order_code.slice(0, -3); // strip "-BH"
+        // Warranty (-BH, -BH2, -BH3, ...): derive from the rewritten source
+        // order's new code, preserving the original warranty suffix.
+        const suffix = warrantyMatch![0];
+        const oldSourceCode = row.order_code.slice(0, -suffix.length);
         const newSourceCode = oldToNew.get(oldSourceCode);
         if (!newSourceCode) {
           // Source was created before --from-date and is not part of this run.
@@ -148,7 +152,7 @@ async function run() {
           });
           continue;
         }
-        newCode = `${newSourceCode}-BH`;
+        newCode = `${newSourceCode}${suffix}`;
         // Warranty doesn't advance the counter (matches runtime behaviour).
       } else {
         // Regular: use the running sequence, then increment.
