@@ -11,6 +11,7 @@ import warrantyRouter from './routes/warranty';
 import backupRouter from './routes/backup';
 import dashboardRouter from './routes/dashboard';
 import reportsRouter from './routes/reports';
+import agentRouter from './routes/agent';
 import { errorHandler } from './middleware/errorHandler';
 import { startScheduler } from './scheduler';
 
@@ -39,6 +40,7 @@ app.use('/api/warranty', warrantyRouter);
 app.use('/api/backup', backupRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/agent', agentRouter);
 
 if (process.env.NODE_ENV !== 'test') {
   startScheduler();
