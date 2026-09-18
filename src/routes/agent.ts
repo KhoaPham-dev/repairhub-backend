@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { pool } from '../config/database';
 import { asyncHandler } from '../utils/asyncHandler';
 import { maskFaultDescription } from '../services/agentPrivacy';
@@ -25,6 +26,7 @@ const router = Router();
 
 const UNAUTHORIZED_BODY = { success: false, data: null, error: 'Unauthorized' };
 const NOT_FOUND_BODY = { success: false, data: null, error: 'Not found' };
+const TOO_MANY_REQUESTS_BODY = { success: false, data: null, error: 'Too Many Requests' };
 
 // Hashing both sides to a fixed-length digest before crypto.timingSafeEqual
 // avoids both (a) the length-mismatch throw timingSafeEqual raises for
@@ -100,6 +102,121 @@ export function logAgentApiStartupStatus(): void {
   );
 }
 
+// ── Client IP resolution (NFR-08.5 logging + rate limiting) ─────────────────
+// In the tunnel deployment, requests arrive through `cloudflared` on
+// loopback, so the socket-level address (`req.ip`) is not the real client
+// IP — Cloudflare's `CF-Connecting-IP` header carries that instead. That
+// header is trivially spoofable by anyone who can reach the server directly
+// (bypassing the tunnel), so it is only trusted when the operator has
+// explicitly confirmed all traffic is tunnel-only via `TRUST_CLOUDFLARE_IP`.
+function resolveClientIp(req: Request): string {
+  if (process.env.TRUST_CLOUDFLARE_IP === 'true') {
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (typeof cfIp === 'string' && cfIp.trim().length > 0) return cfIp.trim();
+  }
+  return req.ip ?? 'unknown';
+}
+
+// ── Request logging (NFR-08.5) ──────────────────────────────────────────────
+type AgentOutcome = 'ok' | 'unauthorized' | 'disabled' | 'bad_request' | 'error';
+
+// Most outcomes are inferred from the final status code; 'disabled' is the
+// one ambiguous case (a config-disabled response and a legitimate "order
+// not found" response are both 404), so authenticateAgent tags it
+// explicitly via res.locals.agentOutcome before responding.
+function resolveOutcome(res: Response): AgentOutcome {
+  const explicit = res.locals.agentOutcome as AgentOutcome | undefined;
+  if (explicit) return explicit;
+  const status = res.statusCode;
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 401) return 'unauthorized';
+  if (status >= 400 && status < 500) return 'bad_request';
+  return 'error';
+}
+
+// req.route is only populated once Express has matched a specific
+// `router.get(...)` layer; early-exit responses (auth failure, disabled API,
+// rate limited) never reach one, so this falls back to the query-string-free
+// request path in that case — the parameterised form is preferred when
+// available so a specific order id/code is never itself logged.
+function resolveLoggedPath(req: Request): string {
+  const routePath = (req as Request & { route?: { path?: string } }).route?.path;
+  return typeof routePath === 'string' ? `/api/agent${routePath}` : req.path;
+}
+
+// Logs one structured line per request, written once the response finishes,
+// so every outcome — success, unauthorized, disabled, rate-limited, or a
+// validation/server error — is captured (NFR-08.5). Mounted before auth AND
+// before rate limiting so both of those are logged too. NEVER logs the
+// X-Agent-Key value or any query-string values (which can contain free
+// text, e.g. an MCP-supplied date/status) — only the resolved path (see
+// resolveLoggedPath), which excludes the query string entirely.
+function agentRequestLogger(req: Request, res: Response, next: NextFunction): void {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const entry = {
+      ts: new Date().toISOString(),
+      method: req.method,
+      path: resolveLoggedPath(req),
+      status: res.statusCode,
+      duration_ms: Date.now() - startedAt,
+      ip: resolveClientIp(req),
+      outcome: resolveOutcome(res),
+    };
+    console.log(`[agent-api] ${JSON.stringify(entry)}`);
+  });
+  next();
+}
+
+router.use(agentRequestLogger);
+
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// All four bounds are configurable via env (defaults match the NFR-08
+// targets: 120 req/min global, 20 failed-auth attempts per 15 min) so ops
+// can tune them without a code change, and so tests can use small
+// windows/limits instead of waiting on real wall-clock time.
+const RATE_LIMIT_WINDOW_MS = Number(process.env.AGENT_API_RATE_LIMIT_WINDOW_MS) || 60 * 1000;
+const RATE_LIMIT_MAX = Number(process.env.AGENT_API_RATE_LIMIT_MAX) || 120;
+const AUTH_FAIL_WINDOW_MS = Number(process.env.AGENT_API_AUTH_FAIL_WINDOW_MS) || 15 * 60 * 1000;
+const AUTH_FAIL_MAX = Number(process.env.AGENT_API_AUTH_FAIL_LIMIT_MAX) || 20;
+
+function tooManyRequestsHandler(_req: Request, res: Response): void {
+  res.status(429).json(TOO_MANY_REQUESTS_BODY);
+}
+
+// Global per-IP bound on all /api/agent/* traffic, regardless of outcome.
+const globalRateLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  limit: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: false, // custom keyGenerator already normalises the IP itself
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIp(req)),
+  handler: tooManyRequestsHandler,
+});
+
+// Stricter per-IP bound counting ONLY failed-auth (401) responses, so a
+// brute-forced or leaked key is bounded independently of normal traffic —
+// a burst of valid or merely-invalid (400/404) requests never counts
+// against it. `skipSuccessfulRequests` + a `requestWasSuccessful` override
+// is express-rate-limit's supported way to define "successful" as anything
+// other than the one status this limiter cares about, per its own
+// skip-counting hook (this is the library's "counter on 401s" mechanism).
+const authFailureRateLimiter = rateLimit({
+  windowMs: AUTH_FAIL_WINDOW_MS,
+  limit: AUTH_FAIL_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: false,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req, res) => res.statusCode !== 401,
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIp(req)),
+  handler: tooManyRequestsHandler,
+});
+
+router.use(globalRateLimiter);
+router.use(authFailureRateLimiter);
+
 // Auth: `X-Agent-Key` header compared (constant-time) against AGENT_API_KEY,
 // but only once checkAgentApiConfig() confirms the whole API is enabled —
 // see checkAgentApiConfig for why an invalid/missing PUBLIC_MEDIA_BASE_URL
@@ -108,6 +225,7 @@ export function logAgentApiStartupStatus(): void {
 // which is false when the server has no usable configuration at all.
 function authenticateAgent(req: Request, res: Response, next: NextFunction): void {
   if (!checkAgentApiConfig().enabled) {
+    res.locals.agentOutcome = 'disabled' satisfies AgentOutcome;
     res.status(404).json(NOT_FOUND_BODY);
     return;
   }

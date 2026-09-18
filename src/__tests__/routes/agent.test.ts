@@ -19,6 +19,18 @@ function buildApp() {
   return app;
 }
 
+// Request logging (agentRequestLogger) is exercised for real on every
+// request in this file (it's mounted unconditionally, before auth) — quiet
+// its console.log output here since this file isn't the one asserting on
+// it (see agentRequestLogging.test.ts for that).
+beforeAll(() => {
+  jest.spyOn(console, 'log').mockImplementation(() => {});
+});
+
+afterAll(() => {
+  (console.log as jest.Mock).mockRestore();
+});
+
 beforeEach(() => {
   process.env.AGENT_API_KEY = AGENT_KEY;
   process.env.PUBLIC_MEDIA_BASE_URL = 'https://media.example.com';

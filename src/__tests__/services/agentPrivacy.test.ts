@@ -54,4 +54,26 @@ describe('maskFaultDescription', () => {
       'Đơn liên quan tới mã 20260918'
     );
   });
+
+  // ── Fully separated (one separator per digit) formats ───────────────────
+  it.each([
+    ['0 9 1 2 3 4 5 6 7 8', 'space between every digit'],
+    ['0.9.1.2.3.4.5.6.7.8', 'dot between every digit'],
+    ['0-9-1-2-3-4-5-6-7-8', 'dash between every digit'],
+    ['+84 9 1 2 3 4 5 6 7 8', 'plus-84 prefix, space between every digit'],
+  ])('masks a fully separated Vietnamese phone number: %s (%s)', (phone) => {
+    const masked = maskFaultDescription(`Khách liên hệ ${phone} sau khi sửa xong`);
+    expect(masked).toBe('Khách liên hệ [đã ẩn] sau khi sửa xong');
+    expect(masked).not.toMatch(/\d/);
+  });
+
+  it('does not mask "84 tuổi" even when the surrounding text is long (wider span cap does not widen the false-positive gap)', () => {
+    const text = 'Máy đã dùng được 84 tuổi thọ pin và vẫn còn hoạt động khá tốt cho tới bây giờ';
+    expect(maskFaultDescription(text)).toBe(text);
+  });
+
+  it('does not mask a plain order code even with the widened span cap', () => {
+    const text = 'Đơn liên quan tới mã 20260918-00007';
+    expect(maskFaultDescription(text)).toBe(text);
+  });
 });

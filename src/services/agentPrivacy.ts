@@ -9,13 +9,18 @@ const MASK_TOKEN = '[đã ẩn]';
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
 // Matches Vietnamese phone-number-like sequences: a leading +84/84/0 marker
-// followed by 7-14 more digits/spaces/dots/dashes, ending in a digit. This
-// intentionally covers common formats — 0912345678, 0912 345 678,
-// 0912.345.678, 0912-345-678, +84 912 345 678 — as a single candidate regex;
-// the actual decision to mask is made in the replace callback below, which
+// followed by 7-24 more digits/spaces/dots/dashes, ending in a digit. The
+// span cap is generous enough to hold up to 11 digits with a separator
+// between EVERY digit (worst case ~1-2 chars per digit, roughly 25
+// characters total) — e.g. "0 9 1 2 3 4 5 6 7 8", "0.9.1.2.3.4.5.6.7.8",
+// "0-9-1-2-3-4-5-6-7-8", "+84 9 1 2 3 4 5 6 7 8" — in addition to the
+// common tighter formats (0912345678, 0912 345 678, 0912.345.678,
+// 0912-345-678, +84 912 345 678). This is a single candidate regex; the
+// actual decision to mask is made in the replace callback below, which
 // strips separators and checks the resulting digit count is phone-length
-// (9-11 digits), so short unrelated numbers (e.g. "84 tuổi") aren't masked.
-const PHONE_CANDIDATE_REGEX = /(?:\+?84|0)[\d\s.-]{7,14}\d/g;
+// (9-11 digits), so short unrelated numbers (e.g. "84 tuổi") aren't masked
+// even though the wider span could technically match around them.
+const PHONE_CANDIDATE_REGEX = /(?:\+?84|0)[\d\s.-]{7,24}\d/g;
 
 function isPhoneLength(digits: string): boolean {
   return digits.length >= 9 && digits.length <= 11;
