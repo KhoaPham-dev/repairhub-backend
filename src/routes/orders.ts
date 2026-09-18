@@ -61,6 +61,9 @@ const STATUS_FLOW = [
   'TRA_HANG', 'HUY_TRA_MAY',
 ];
 const TERMINAL_STATUSES = ['DA_GIAO', 'HUY_TRA_MAY'];
+// Statuses that require a fresh COMPLETION photo (taken after the order's
+// most recent status change) before the transition is allowed.
+const IMAGE_REQUIRED_STATUSES = ['DA_GIAO', 'TRA_HANG'];
 
 // A source order may have multiple warranty orders: <src>-BH, <src>-BH2,
 // <src>-BH3, ... A warranty order's code always ends with this suffix, and a
@@ -512,6 +515,18 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   if (!STATUS_FLOW.includes(status)) {
     res.status(400).json({ success: false, data: null, error: 'Trạng thái không hợp lệ' });
     return;
+  }
+
+  if (IMAGE_REQUIRED_STATUSES.includes(status)) {
+    const completionImage = await pool.query(
+      `SELECT 1 FROM order_images oi WHERE oi.order_id = $1 AND oi.image_type = 'COMPLETION'
+       AND oi.uploaded_at > (SELECT MAX(changed_at) FROM order_status_history WHERE order_id = $1) LIMIT 1`,
+      [req.params.id]
+    );
+    if (!completionImage.rows[0]) {
+      res.status(400).json({ success: false, data: null, error: 'Vui lòng tải ảnh khi chuyển sang trạng thái Trả hàng / Đã giao' });
+      return;
+    }
   }
 
   let warrantyUpdate = '';
