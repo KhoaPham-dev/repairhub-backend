@@ -518,9 +518,15 @@ router.put('/:id/status', asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (IMAGE_REQUIRED_STATUSES.includes(status)) {
+    // Compare against real status transitions only. PATCH /:id inserts
+    // administrative order_status_history rows (old_status = new_status) for
+    // warranty-duration edits (RH-133) and notes-only updates; those must not
+    // bump the "latest change" timestamp, or a completion photo uploaded
+    // before such an edit would wrongly stop counting as fresh. Creation
+    // rows (old_status IS NULL) still count via IS DISTINCT FROM.
     const completionImage = await pool.query(
       `SELECT 1 FROM order_images oi WHERE oi.order_id = $1 AND oi.image_type = 'COMPLETION'
-       AND oi.uploaded_at > (SELECT MAX(changed_at) FROM order_status_history WHERE order_id = $1) LIMIT 1`,
+       AND oi.uploaded_at > (SELECT MAX(changed_at) FROM order_status_history WHERE order_id = $1 AND old_status IS DISTINCT FROM new_status) LIMIT 1`,
       [req.params.id]
     );
     if (!completionImage.rows[0]) {

@@ -822,7 +822,26 @@ describe('PUT /api/orders/:id/status', () => {
     expect(imageCheckCall).toBeDefined();
     expect(imageCheckCall![0]).toContain("image_type = 'COMPLETION'");
     expect(imageCheckCall![0]).toContain('MAX(changed_at)');
+    expect(imageCheckCall![0]).toContain('old_status IS DISTINCT FROM new_status');
     expect(imageCheckCall![1]).toEqual(['o1']);
+  });
+
+  it('completion-image freshness check excludes administrative history rows (old_status = new_status)', async () => {
+    // RH-133 warranty-duration edits and notes-only PATCH updates insert
+    // order_status_history rows with old_status = new_status. Those rows
+    // must not count as the "latest change" for the freshness comparison,
+    // so the query explicitly filters them out.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [] });                        // completion image check: none found
+    await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'DA_GIAO' });
+    const imageCheckCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('order_images')
+    );
+    expect(imageCheckCall![0]).toContain('AND old_status IS DISTINCT FROM new_status');
   });
 });
 
