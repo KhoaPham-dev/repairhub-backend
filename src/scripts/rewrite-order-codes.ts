@@ -70,6 +70,38 @@ interface OrderRow {
   created_at: Date;
 }
 
+export interface WarrantyCodeDerivation {
+  newCode?: string;
+  skipReason?: string;
+}
+
+// Pure helper: derive the new code for a warranty order's old code (one
+// ending in -BH, -BH2, -BH3, ...), given the map of old->new codes already
+// assigned to orders processed earlier in the walk (see `run` step 3).
+// Preserves the original warranty suffix on the rewritten source code.
+//
+// Returns `undefined` if `oldCode` isn't a warranty code at all (caller
+// should treat it as a regular order). Returns `{ skipReason }` (no
+// `newCode`) if it IS a warranty code but its source hasn't been rewritten
+// in this run yet — e.g. the source pre-dates --from-date.
+export function deriveWarrantyCode(
+  oldCode: string,
+  oldToNew: ReadonlyMap<string, string>
+): WarrantyCodeDerivation | undefined {
+  const match = WARRANTY_SUFFIX_RE.exec(oldCode);
+  if (!match) return undefined;
+
+  const suffix = match[0];
+  const oldSourceCode = oldCode.slice(0, -suffix.length);
+  const newSourceCode = oldToNew.get(oldSourceCode);
+  if (!newSourceCode) {
+    return {
+      skipReason: `source order ${oldSourceCode} pre-dates --from-date and was not rewritten`,
+    };
+  }
+  return { newCode: `${newSourceCode}${suffix}` };
+}
+
 async function run() {
   if (!process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL must be set (e.g. inside the running backend container, or via --env-file).');
@@ -133,26 +165,22 @@ async function run() {
         runningSeq = 0;
       }
 
-      const warrantyMatch = WARRANTY_SUFFIX_RE.exec(row.order_code);
-      const isWarranty = warrantyMatch !== null;
+      const warrantyDerivation = deriveWarrantyCode(row.order_code, oldToNew);
       let newCode: string;
 
-      if (isWarranty) {
+      if (warrantyDerivation) {
         // Warranty (-BH, -BH2, -BH3, ...): derive from the rewritten source
         // order's new code, preserving the original warranty suffix.
-        const suffix = warrantyMatch![0];
-        const oldSourceCode = row.order_code.slice(0, -suffix.length);
-        const newSourceCode = oldToNew.get(oldSourceCode);
-        if (!newSourceCode) {
+        if (warrantyDerivation.skipReason) {
           // Source was created before --from-date and is not part of this run.
           skipped.push({
             id: row.id,
             oldCode: row.order_code,
-            reason: `source order ${oldSourceCode} pre-dates --from-date and was not rewritten`,
+            reason: warrantyDerivation.skipReason,
           });
           continue;
         }
-        newCode = `${newSourceCode}${suffix}`;
+        newCode = warrantyDerivation.newCode!;
         // Warranty doesn't advance the counter (matches runtime behaviour).
       } else {
         // Regular: use the running sequence, then increment.
@@ -206,7 +234,11 @@ async function run() {
   }
 }
 
-run().catch((err) => {
-  console.error('[rewrite] FAILED:', err.message);
-  process.exit(1);
-});
+// Guard so importing this module (e.g. from a unit test, to exercise
+// `deriveWarrantyCode`) doesn't also kick off the live CLI run.
+if (require.main === module) {
+  run().catch((err) => {
+    console.error('[rewrite] FAILED:', err.message);
+    process.exit(1);
+  });
+}

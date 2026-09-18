@@ -412,6 +412,34 @@ describe('POST /api/orders/warranty-claim', () => {
     expect(insertCall[1][0]).toBe('X1-BH2');
   });
 
+  it('ignores an existing warranty code whose suffix is not a safe integer', async () => {
+    // '-BH99999999999999999999' exceeds Number.MAX_SAFE_INTEGER — must be
+    // treated as a non-match, not coerced into a (wrong) numeric value.
+    const sourceOrder = {
+      id: 'o1', order_code: 'S2', product_type: 'SPEAKER',
+      customer_id: 'c1', device_name: 'JBL Flip 6',
+      serial_imei: 'SN123', warranty_period_months: 12,
+    };
+    const newBhOrder = { id: 'bh2', order_code: 'S2-BH2', status: 'DANG_BAO_HANH' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [sourceOrder] })
+      .mockResolvedValueOnce({
+        rows: [
+          { order_code: 'S2-BH99999999999999999999' },
+          { order_code: 'S2-BH' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [newBhOrder] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp())
+      .post('/api/orders/warranty-claim')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ source_order_id: 'o1', branch_id: 'b1' });
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls[2];
+    expect(insertCall[1][0]).toBe('S2-BH2');
+  });
+
   it('retries with the next code on a unique-violation race and succeeds', async () => {
     const sourceOrder = {
       id: 'o1', order_code: 'S1', product_type: 'SPEAKER',

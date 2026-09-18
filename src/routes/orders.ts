@@ -124,7 +124,18 @@ async function nextWarrantyCode(sourceCode: string): Promise<string> {
   for (const row of existing.rows) {
     const match = exactRe.exec(row.order_code);
     if (!match) continue;
-    const n = match[1] === '' ? 1 : Number(match[1]);
+    let n: number;
+    if (match[1] === '') {
+      n = 1;
+    } else {
+      const parsed = Number(match[1]);
+      // A malformed/out-of-range explicit suffix (not a safe integer, or an
+      // explicit number below 2 — the bare "-BH" is always the implicit 1)
+      // is treated as a non-match rather than coerced, so it can never
+      // silently poison the numbering.
+      if (!Number.isSafeInteger(parsed) || parsed < 2) continue;
+      n = parsed;
+    }
     if (n > maxN) maxN = n;
   }
   return maxN === 0 ? `${sourceCode}-BH` : `${sourceCode}-BH${maxN + 1}`;
