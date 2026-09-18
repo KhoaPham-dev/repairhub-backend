@@ -141,7 +141,24 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
-  await pool.query('DELETE FROM customers WHERE id = $1', [req.params.id]);
+  const existingOrder = await pool.query('SELECT 1 FROM orders WHERE customer_id = $1 LIMIT 1', [req.params.id]);
+  if (existingOrder.rows[0]) {
+    res.status(409).json({ success: false, data: null, error: 'Khách hàng đã có đơn hàng, không thể xoá' });
+    return;
+  }
+
+  try {
+    await pool.query('DELETE FROM customers WHERE id = $1', [req.params.id]);
+  } catch (err) {
+    // Race condition: an order was inserted for this customer between the
+    // pre-check above and this DELETE (Postgres foreign_key_violation).
+    // Return the same 409 shape rather than letting the FK error surface as a 500.
+    if ((err as { code?: string }).code === '23503') {
+      res.status(409).json({ success: false, data: null, error: 'Khách hàng đã có đơn hàng, không thể xoá' });
+      return;
+    }
+    throw err;
+  }
   await logActivity(req.user!.id, 'DELETE_CUSTOMER', 'customer', req.params.id);
   res.json({ success: true, data: null, error: null });
 }));

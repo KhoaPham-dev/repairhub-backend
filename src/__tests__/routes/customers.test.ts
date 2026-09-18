@@ -257,12 +257,47 @@ describe('PUT /api/customers/:id', () => {
 });
 
 describe('DELETE /api/customers/:id', () => {
-  it('deletes customer and returns success', async () => {
+  it('deletes customer and returns success when there are no orders', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // orders pre-check — none found
     mockQuery.mockResolvedValueOnce({ rows: [] }); // DELETE
     const res = await request(buildApp())
       .delete('/api/customers/c1')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT 1 FROM orders WHERE customer_id = $1 LIMIT 1',
+      ['c1']
+    );
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      2,
+      'DELETE FROM customers WHERE id = $1',
+      ['c1']
+    );
+  });
+
+  it('returns 409 when the customer already has orders (no DELETE issued)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // orders pre-check — match found
+    const res = await request(buildApp())
+      .delete('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Khách hàng đã có đơn hàng, không thể xoá');
+    // DELETE should NOT have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 409 when a concurrent order insert wins the race (foreign_key_violation 23503)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // orders pre-check — none found at check time
+    mockQuery.mockRejectedValueOnce(Object.assign(new Error('violates foreign key constraint'), { code: '23503' })); // DELETE loses the race
+    const res = await request(buildApp())
+      .delete('/api/customers/c1')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Khách hàng đã có đơn hàng, không thể xoá');
+    expect(mockQuery).toHaveBeenCalledTimes(2);
   });
 });
