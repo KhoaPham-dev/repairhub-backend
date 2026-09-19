@@ -141,7 +141,7 @@ function resolveOutcome(res: Response): AgentOutcome {
 // available so a specific order id/code is never itself logged.
 function resolveLoggedPath(req: Request): string {
   const routePath = (req as Request & { route?: { path?: string } }).route?.path;
-  return typeof routePath === 'string' ? `/api/agent${routePath}` : req.path;
+  return typeof routePath === 'string' ? `/api/agent${routePath}` : `${req.baseUrl}${req.path}`;
 }
 
 // Logs one structured line per request, written once the response finishes,

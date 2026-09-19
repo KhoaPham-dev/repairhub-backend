@@ -79,6 +79,8 @@ describe('agentRequestLogger — one structured line per request', () => {
     const entry = parseSingleAgentLogEntry();
     expect(entry.status).toBe(401);
     expect(entry.outcome).toBe('unauthorized');
+    // Early-exit responses log the full mount path, same as matched routes.
+    expect(entry.path).toBe('/api/agent/orders');
   });
 
   it('logs a 401 (wrong key) request — auth failures are logged too, before auth runs', async () => {
