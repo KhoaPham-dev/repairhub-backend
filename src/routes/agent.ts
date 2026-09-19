@@ -195,27 +195,26 @@ const globalRateLimiter = rateLimit({
   handler: tooManyRequestsHandler,
 });
 
-// Stricter per-IP bound counting ONLY failed-auth (401) responses, so a
-// brute-forced or leaked key is bounded independently of normal traffic —
-// a burst of valid or merely-invalid (400/404) requests never counts
-// against it. `skipSuccessfulRequests` + a `requestWasSuccessful` override
-// is express-rate-limit's supported way to define "successful" as anything
-// other than the one status this limiter cares about, per its own
-// skip-counting hook (this is the library's "counter on 401s" mechanism).
+// Stricter per-IP bound on failed authentication attempts, so a
+// brute-forced or leaked key is bounded independently of normal traffic.
+// It is NOT mounted on the router: authenticateAgent invokes it only from
+// its invalid-key branch, so it counts nothing but real auth failures and a
+// request carrying the correct key never consults it. That matters because
+// all legitimate traffic comes from a single IP (the mcp container) — a
+// pre-auth limiter would lock the correct key out for the whole window after
+// a burst of failures (e.g. during a mismatched key rotation). Keying stays
+// per IP (not per IP + attempted key), so rotating guesses cannot escape it.
 const authFailureRateLimiter = rateLimit({
   windowMs: AUTH_FAIL_WINDOW_MS,
   limit: AUTH_FAIL_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   validate: false,
-  skipSuccessfulRequests: true,
-  requestWasSuccessful: (_req, res) => res.statusCode !== 401,
   keyGenerator: (req) => ipKeyGenerator(resolveClientIp(req)),
   handler: tooManyRequestsHandler,
 });
 
 router.use(globalRateLimiter);
-router.use(authFailureRateLimiter);
 
 // Auth: `X-Agent-Key` header compared (constant-time) against AGENT_API_KEY,
 // but only once checkAgentApiConfig() confirms the whole API is enabled —
@@ -233,7 +232,14 @@ function authenticateAgent(req: Request, res: Response, next: NextFunction): voi
   const configuredKey = process.env.AGENT_API_KEY!;
   const providedKey = req.headers['x-agent-key'];
   if (typeof providedKey !== 'string' || !constantTimeEquals(providedKey, configuredKey)) {
-    res.status(401).json(UNAUTHORIZED_BODY);
+    // Count this failure; once the per-IP budget is spent the limiter answers
+    // 429 itself instead of calling the 401 continuation.
+    // The limiter is async at runtime but typed as returning void.
+    Promise.resolve(
+      authFailureRateLimiter(req, res, () => {
+        res.status(401).json(UNAUTHORIZED_BODY);
+      }),
+    ).catch(next);
     return;
   }
 

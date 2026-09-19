@@ -101,6 +101,29 @@ describe('Agent API — failed-auth (401) rate limit', () => {
     expect(res.body).toEqual({ success: false, data: null, error: 'Too Many Requests' });
   });
 
+  it('keeps serving a valid key from the same IP after that IP has tripped the failed-auth limit', async () => {
+    process.env.AGENT_API_RATE_LIMIT_MAX = '1000';
+    process.env.AGENT_API_AUTH_FAIL_LIMIT_MAX = '3';
+    const app = loadFreshAgentApp();
+
+    for (let i = 0; i < 3; i++) {
+      const res = await request(app).get('/api/agent/orders').set('X-Agent-Key', 'wrong-key');
+      expect(res.status).toBe(401);
+    }
+    const blocked = await request(app).get('/api/agent/orders').set('X-Agent-Key', 'wrong-key');
+    expect(blocked.status).toBe(429);
+
+    // Same IP, correct key: must not be locked out (e.g. after a mismatched
+    // key rotation between backend and mcp is corrected).
+    mockSuccessfulOrdersListQuery();
+    const valid = await request(app).get('/api/agent/orders').set('X-Agent-Key', AGENT_KEY);
+    expect(valid.status).toBe(200);
+
+    // Wrong keys stay blocked for the rest of the window.
+    const stillBlocked = await request(app).get('/api/agent/orders').set('X-Agent-Key', 'another-guess');
+    expect(stillBlocked.status).toBe(429);
+  });
+
   it('does not count successful (200) requests toward the failed-auth limit', async () => {
     process.env.AGENT_API_RATE_LIMIT_MAX = '1000';
     process.env.AGENT_API_AUTH_FAIL_LIMIT_MAX = '2';
