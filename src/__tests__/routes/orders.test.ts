@@ -780,7 +780,6 @@ describe('PUT /api/orders/:id/status', () => {
     const updated = { id: 'o1', status: 'DA_GIAO' };
     mockQuery
       .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })              // current order status
-      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })                   // completion image check
       .mockResolvedValueOnce({ rows: [{ warranty_period_months: 6 }] })        // fetch warranty months
       .mockResolvedValueOnce({ rows: [] })                                     // UPDATE orders
       .mockResolvedValueOnce({ rows: [] })                                     // INSERT history
@@ -788,7 +787,7 @@ describe('PUT /api/orders/:id/status', () => {
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'DA_GIAO', notes: 'Đã giao cho khách' });
+      .send({ status: 'DA_GIAO' });
     expect(res.status).toBe(200);
     // New parameterized form: SQL uses INTERVAL '1 month' * $N, params include 6
     const updateCall = mockQuery.mock.calls.find(
@@ -798,14 +797,38 @@ describe('PUT /api/orders/:id/status', () => {
     expect(updateCall![1]).toContain(6);
   });
 
-  it('rejects DA_GIAO without notes, and issues no image query', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] });  // current order status
+  it('allows DA_GIAO with neither notes nor an image, runs no order_images evidence query, and still applies warranty_end_date', async () => {
+    const updated = { id: 'o1', status: 'DA_GIAO' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })              // current order status
+      .mockResolvedValueOnce({ rows: [{ warranty_period_months: 12 }] })       // fetch warranty months
+      .mockResolvedValueOnce({ rows: [] })                                     // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] })                                     // INSERT history
+      .mockResolvedValueOnce({ rows: [updated] });                             // SELECT updated
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'DA_GIAO' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('DA_GIAO');
+    const imageCheckCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('order_images')
+    );
+    expect(imageCheckCall).toBeUndefined();
+    const updateCall = mockQuery.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
+    );
+    expect(updateCall![0]).toContain('warranty_end_date');
+  });
+
+  it('rejects SUA_XONG without notes, and issues no image query', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] });  // current order status
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'SUA_XONG' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
     const imageCheckCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('order_images')
     );
@@ -816,34 +839,60 @@ describe('PUT /api/orders/:id/status', () => {
     expect(updateCall).toBeUndefined();
   });
 
-  it('rejects DA_GIAO with notes but without a fresh COMPLETION image', async () => {
+  it('rejects SUA_XONG with blank (whitespace-only) notes', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] });  // current order status
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'SUA_XONG', notes: '   ' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
+  });
+
+  it('rejects SUA_XONG with notes but without a fresh COMPLETION image', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })  // current order status
-      .mockResolvedValueOnce({ rows: [] });                        // completion image check: none found
+      .mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [] });                             // completion image check: none found
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'DA_GIAO', notes: 'Đã giao cho khách' });
+      .send({ status: 'SUA_XONG', notes: 'Đã sửa xong' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
     const updateCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
     );
     expect(updateCall).toBeUndefined();
   });
 
-  it('rejects DA_GIAO with non-string notes', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] });  // current order status
+  it('rejects SUA_XONG with non-string notes', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] });  // current order status
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'DA_GIAO', notes: 12345 });
+      .send({ status: 'SUA_XONG', notes: 12345 });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
     const imageCheckCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('order_images')
     );
     expect(imageCheckCall).toBeUndefined();
+  });
+
+  it('allows SUA_XONG with notes and a fresh COMPLETION image', async () => {
+    const updated = { id: 'o1', status: 'SUA_XONG' };
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })            // completion image check: found
+      .mockResolvedValueOnce({ rows: [] })                              // UPDATE orders
+      .mockResolvedValueOnce({ rows: [] })                              // INSERT history
+      .mockResolvedValueOnce({ rows: [updated] });                      // SELECT updated
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'SUA_XONG', notes: 'Đã sửa xong' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('SUA_XONG');
   });
 
   it('rejects HUY_TRA_MAY without notes', async () => {
@@ -853,7 +902,7 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'HUY_TRA_MAY' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
   });
 
   it('rejects HUY_TRA_MAY with blank (whitespace-only) notes', async () => {
@@ -863,7 +912,7 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'HUY_TRA_MAY', notes: '   ' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
   });
 
   it('rejects HUY_TRA_MAY with notes but without a fresh COMPLETION image', async () => {
@@ -875,7 +924,7 @@ describe('PUT /api/orders/:id/status', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ status: 'HUY_TRA_MAY', notes: 'Khách huỷ trả máy' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Đã giao / Huỷ trả máy');
+    expect(res.body.error).toBe('Vui lòng tải ảnh hoặc video khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
     const updateCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('UPDATE orders')
     );
@@ -918,16 +967,16 @@ describe('PUT /api/orders/:id/status', () => {
   });
 
   it('does not run the completion-image check for a non-required status', async () => {
-    const updated = { id: 'o1', status: 'SUA_XONG' };
+    const updated = { id: 'o1', status: 'BAO_GIA' };
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [{ status: 'DANG_KIEM_TRA' }] })  // current order status
       .mockResolvedValueOnce({ rows: [] })                              // UPDATE orders
       .mockResolvedValueOnce({ rows: [] })                              // INSERT history
       .mockResolvedValueOnce({ rows: [updated] });                      // SELECT updated
     const res = await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'SUA_XONG' });
+      .send({ status: 'BAO_GIA' });
     expect(res.status).toBe(200);
     const imageCheckCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('order_images')
@@ -937,12 +986,12 @@ describe('PUT /api/orders/:id/status', () => {
 
   it('completion-image check query filters on COMPLETION and compares to MAX(changed_at)', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })  // current order status
-      .mockResolvedValueOnce({ rows: [] });                        // completion image check: none found
+      .mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [] });                             // completion image check: none found
     await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'DA_GIAO', notes: 'Đã giao cho khách' });
+      .send({ status: 'SUA_XONG', notes: 'Đã sửa xong' });
     const imageCheckCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('order_images')
     );
@@ -959,16 +1008,26 @@ describe('PUT /api/orders/:id/status', () => {
     // must not count as the "latest change" for the freshness comparison,
     // so the query explicitly filters them out.
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ status: 'SUA_XONG' }] })  // current order status
-      .mockResolvedValueOnce({ rows: [] });                        // completion image check: none found
+      .mockResolvedValueOnce({ rows: [{ status: 'DANG_SUA_CHUA' }] })  // current order status
+      .mockResolvedValueOnce({ rows: [] });                             // completion image check: none found
     await request(buildApp())
       .put('/api/orders/o1/status')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ status: 'DA_GIAO', notes: 'Đã giao cho khách' });
+      .send({ status: 'SUA_XONG', notes: 'Đã sửa xong' });
     const imageCheckCall = mockQuery.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('order_images')
     );
     expect(imageCheckCall![0]).toContain('AND old_status IS DISTINCT FROM new_status');
+  });
+
+  it('warranty-order transition from DANG_BAO_HANH to SUA_XONG follows the same evidence rule (no special-casing)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ status: 'DANG_BAO_HANH' }] });  // current order status
+    const res = await request(buildApp())
+      .put('/api/orders/o1/status')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'SUA_XONG' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Vui lòng nhập ghi chú khi chuyển sang trạng thái Sửa xong / Huỷ trả máy');
   });
 });
 
