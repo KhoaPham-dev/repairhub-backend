@@ -17,6 +17,14 @@ import { startScheduler } from './scheduler';
 
 const app = express();
 
+// Behind nginx, trust that many proxy hops so req.ip (Agent API rate limits
+// and request logs) is the real client from X-Forwarded-For rather than the
+// proxy's address. Unset/0 keeps Express's default of trusting nothing.
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY ?? '', 10);
+if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
+  app.set('trust proxy', trustProxyHops);
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

@@ -52,3 +52,30 @@ describe('/uploads static route', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('TRUST_PROXY', () => {
+  function loadAppWith(value: string | undefined): Express {
+    let fresh: Express;
+    if (value === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = value;
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      fresh = require('../app').default;
+    });
+    delete process.env.TRUST_PROXY;
+    return fresh!;
+  }
+
+  it('trusts no proxy by default', () => {
+    expect(loadAppWith(undefined).get('trust proxy')).toBe(false);
+  });
+
+  it('trusts the configured number of hops behind nginx', () => {
+    expect(loadAppWith('1').get('trust proxy')).toBe(1);
+  });
+
+  it('ignores 0 and non-numeric values', () => {
+    expect(loadAppWith('0').get('trust proxy')).toBe(false);
+    expect(loadAppWith('yes').get('trust proxy')).toBe(false);
+  });
+});
