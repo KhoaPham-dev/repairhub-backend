@@ -423,7 +423,7 @@ describe('GET /api/reports/partner', () => {
   });
 
   it('returns 404 when customer exists but is not a partner', async () => {
-    // The query filters by customer_type = 'partner' so returns empty rows
+    // The query filters by UPPER(type) = 'PARTNER' so returns empty rows
     mockQuery.mockResolvedValueOnce({ rows: [] });
     const res = await request(buildApp())
       .get(baseQuery)

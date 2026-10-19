@@ -39,7 +39,7 @@ const detailRow = {
   status: 'completed',
   fault_description: 'Fast repair',
   created_at: new Date('2026-04-05T10:00:00Z'),
-  customer_type: 'individual',
+  customer_type: 'RETAIL',
   device_name: 'iPhone 14',
   quotation: '500000',
   customer_name: 'Nguyen Van A',
@@ -200,21 +200,21 @@ describe('generateRevenueReport', () => {
       'Loại khách', 'Số điện thoại', 'Thiết bị', 'Báo giá',
     ]);
 
-    // Data row — customer_type 'individual' → 'Cá nhân'
+    // Data row — customer_type 'RETAIL' → 'Khách lẻ'
     const dataRow = detailData[1];
     expect(dataRow[0]).toBe('ORD-001');
     expect(dataRow[1]).toBe('completed');
     expect(dataRow[2]).toBe('Fast repair');
     expect(typeof dataRow[3]).toBe('string'); // formatted date string
     expect(dataRow[4]).toBe('Nguyen Van A');
-    expect(dataRow[5]).toBe('Cá nhân');
+    expect(dataRow[5]).toBe('Khách lẻ');
     expect(dataRow[6]).toBe('0901234567');
     expect(dataRow[7]).toBe('iPhone 14');
     expect(dataRow[8]).toBe(500000);
   });
 
-  it('maps customer_type partner → "Đối tác" and unknown → as-is', async () => {
-    const partnerRow = { ...detailRow, customer_type: 'partner', order_code: 'ORD-002' };
+  it('maps customer_type PARTNER → "Đối tác" and unknown → as-is', async () => {
+    const partnerRow = { ...detailRow, customer_type: 'PARTNER', order_code: 'ORD-002' };
     const unknownRow = { ...detailRow, customer_type: 'corporate', order_code: 'ORD-003' };
 
     mockQuery
@@ -228,6 +228,21 @@ describe('generateRevenueReport', () => {
     const detailData: (string | number | null)[][] = mockAoaToSheet.mock.calls[1][0];
     expect(detailData[1][5]).toBe('Đối tác');
     expect(detailData[2][5]).toBe('corporate');
+  });
+
+  it('maps null customer_type to empty string', async () => {
+    const nullRow = { ...detailRow, customer_type: null };
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: REPORT_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [nullRow] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await generateRevenueReport(periodStart, periodEnd);
+
+    const detailData: (string | number | null)[][] = mockAoaToSheet.mock.calls[1][0];
+    expect(detailData[1][5]).toBe('');
   });
 
   it('appends two sheets to the workbook', async () => {
