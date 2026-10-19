@@ -20,8 +20,8 @@ function formatDateVN(value: Date | string): string {
 }
 
 function displayCustomerType(type: string | null): string {
-  if (type === 'individual') return 'Cá nhân';
-  if (type === 'partner') return 'Đối tác';
+  if (type === 'RETAIL') return 'Khách lẻ';
+  if (type === 'PARTNER') return 'Đối tác';
   return type ?? '';
 }
 
